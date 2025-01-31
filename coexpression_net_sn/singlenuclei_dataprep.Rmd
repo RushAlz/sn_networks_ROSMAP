@@ -1,0 +1,395 @@
+---
+title: "Single nuclei from DLPFC"
+subtitle: "Data prep"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo A. Vialle
+ | Shinya Tasaki
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(Seurat)
+library(tidyverse)
+library(kableExtra)
+library(furrr)
+library(future)
+future::plan(multiprocess)
+
+knitr::opts_chunk$set( 
+  warning=FALSE,
+  message=FALSE,
+  results = 'asis',
+  error = FALSE,
+  tidy = FALSE,
+  fig.show = "hold")
+```
+
+```{css zoom-lib-src, echo = FALSE, eval=F}
+script src = "https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"
+```
+
+```{js zoom-jquery, echo = FALSE}
+ $(document).ready(function() {
+    $('body').prepend('<div class=\"zoomDiv\"><img src=\"\" class=\"zoomImg\"></div>');
+    // onClick function for all plots (img's)
+    $('img:not(.zoomImg)').click(function() {
+      $('.zoomImg').attr('src', $(this).attr('src')).css({width: '100%'});
+      $('.zoomDiv').css({opacity: '1', width: 'auto', border: '1px solid white', borderRadius: '5px', position: 'fixed', top: '50%', left: '50%', marginRight: '-50%', transform: 'translate(-50%, -50%)', boxShadow: '0px 0px 50px #888888', zIndex: '50', overflow: 'auto', maxHeight: '100%'});
+    });
+    // onClick function for zoomImg
+    $('img.zoomImg').click(function() {
+      $('.zoomDiv').css({opacity: '0', width: '0%'}); 
+    });
+  });
+```
+
+```{r Helper Functions, echo=FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+```
+
+## Readme
+
+```
+Hi Shinya,
+
+I uploaded the first part of count matrices of ROSMAP single-nucleus RNAseq to Google Drive. I have sent invitation to the Google folder separately.
+
+Because my storage space is limited, I will transfer data twice. The first part contains 240 folders and 1 annotation file. Please let me know when you finish downloading them. I will delete them and upload the second part.
+
+Each folder is named for ROSMAP projid and contains a count matrix of nuclei from the individual.
+matrix.mtx.gz: UMI count matrix in the MatrixMarket format.
+barcodes.tsv.gz: droplet barcodes, batch, WGS ID, and projid of nuclei.
+features.tsv.gz: Gene ID and gene symbols.
+
+You can read them using the Seurat package of R.
+> library(Seurat)
+> dat <- ReadMtx(mtx="matrix.mtx.gz", cells="barcodes.tsv.gz", features="features.tsv.gz")
+> seu <- CreateSeuratObject(dat)
+
+annotation.2022-01-24.tsv.gz is the latest version of our cell type annotation. This one will be mostly stable, but our collaborator may still add minor tweaks in a next few months. There are several levels of cell type annotations, but we are using cell.type as the top-level cell type, and state as their subtype classifications.
+
+Brief description of data processing:
+Nuclei were isolated from 479 DLPFC tissues of ROSMAP. Tissues were processed as 60 batches, and each batch consisted from 8 donors. In each batch, nuclei suspension of 8 donors were mixed together, and single-nucleus RNAseq library was prepared using 10x Genomics 3 Gene Expression kit (v3 chemistry). The libraries were sequenced, and read mapped and UMI counting were performed using CellRanger v6.0.0 with GENCODE v32 and GRCh38.p13. Original donors of droplets in each batch were inferred by comparing SNPs in RNA reads with ROSMAP WGS VCF using genetic demultiplexing software demuxlet. As a quality control, genotype concordance of RNA and WGS, sex check, duplicated donors, WGS QC, and sequencing depth were assessed, and 424 donors passed the QC. To annotate cell types based on single nucleus expression, nuclei were classified into 8 major cell types, and each major cell type were analyzed separately. Doublets were removed using DoubletFinder, and cells were clustered using Seurat.
+
+Best,
+Masashi
+```
+
+```{r folders, echo=TRUE}
+data_dir = "/pastel/resources/20220203_snRNAseq_AMPAD/"
+```
+
+## Read files
+
+```{r}
+# Read phenotype
+pheno = readRDS("/pastel/resources/phenotypes/basic_Apr2019.rds")
+
+# Read annotation
+annotation = read_tsv(paste0(data_dir,"annotation.2022-01-24.tsv.gz"), show_col_types = FALSE)
+# length(unique(annotation$projid)) # 438
+
+# List samples included
+files_list = list.dirs(path = data_dir, full.names = F)
+files_list = files_list[!files_list==""] 
+
+metadata_df = data.frame(projid = files_list)
+# length(unique(metadata_df$projid)) # 424
+
+pheno.filt = pheno$data %>% filter(projid %in% unique(metadata_df$projid))
+annotation.filt = annotation %>% filter(projid %in% unique(metadata_df$projid))
+
+cell_types_df = as.data.frame(table(annotation$cell.type)) %>% arrange(-Freq) %>% mutate(Fraction = scales::percent(Freq/sum(Freq))) %>% rename(CellType = Var1)
+cell_types_df
+```
+
+We will read each sample' counts table, and create pseudo-bulk tables for each cell type (at least >1%).
+
+```{r eval=F}
+cell_types_df_to_consider = cell_types_df %>% filter(Freq/sum(Freq) > 0.01)
+
+cell_type_ids = list()
+for(cell in cell_types_df_to_consider$CellType){
+  cell_type_ids[[cell]] <- annotation[annotation$cell.type == cell, ]$barcode
+}
+
+read_counts <- function(sample){
+  #sample = metadata_df$projid[1]
+  mtx_file = paste0(data_dir,sample,"/matrix.mtx.gz")
+  cells_file = paste0(data_dir,sample,"/barcodes.tsv.gz")
+  features_file = paste0(data_dir,sample,"/features.tsv.gz")
+  
+  dat <- ReadMtx(mtx=mtx_file, cells=cells_file, features=features_file, feature.column = 1)
+  
+  pseudo_counts <- list()
+  for(cell in names(cell_type_ids)){
+    #cell = names(cell_type_ids)[1]
+    barcodes = annotation[annotation$cell.type == cell,]$barcode
+    cell_selected = which(colnames(dat)%in%barcodes)
+    pseudo_counts[[cell]] <- rowSums(dat[,cell_selected])
+  }
+  pseudo_counts$sample = sample
+  return(pseudo_counts)
+}
+
+pseudo_counts_list <- furrr::future_map(metadata_df$projid, read_counts, .options = furrr_options(seed = 123))
+
+gene_names = names(pseudo_counts_list[[1]]$`Excitatory Neurons`)
+sample_names = unique(metadata_df$projid)
+
+ext_pseudo_counts = as.data.frame(matrix(data = NA, nrow = length(gene_names), ncol = length(sample_names), dimnames = list(gene_names,sample_names)))
+inh_pseudo_counts = as.data.frame(matrix(data = NA, nrow = length(gene_names), ncol = length(sample_names), dimnames = list(gene_names,sample_names)))
+oli_pseudo_counts = as.data.frame(matrix(data = NA, nrow = length(gene_names), ncol = length(sample_names), dimnames = list(gene_names,sample_names)))
+ast_pseudo_counts = as.data.frame(matrix(data = NA, nrow = length(gene_names), ncol = length(sample_names), dimnames = list(gene_names,sample_names)))
+mic_pseudo_counts = as.data.frame(matrix(data = NA, nrow = length(gene_names), ncol = length(sample_names), dimnames = list(gene_names,sample_names)))
+opc_pseudo_counts = as.data.frame(matrix(data = NA, nrow = length(gene_names), ncol = length(sample_names), dimnames = list(gene_names,sample_names)))
+
+for(sample_counts in pseudo_counts_list){
+  #sample_counts = pseudo_counts_list[[1]]
+  ext_pseudo_counts[names(sample_counts$`Excitatory Neurons`),sample_counts$sample] <- sample_counts$`Excitatory Neurons`
+  inh_pseudo_counts[names(sample_counts$`Inhibitory Neurons`),sample_counts$sample] <- sample_counts$`Inhibitory Neurons`
+  oli_pseudo_counts[names(sample_counts$Oligodendrocytes),sample_counts$sample] <- sample_counts$Oligodendrocytes
+  ast_pseudo_counts[names(sample_counts$Astrocyte),sample_counts$sample] <- sample_counts$Astrocyte
+  mic_pseudo_counts[names(sample_counts$Microglia),sample_counts$sample] <- sample_counts$Microglia
+  opc_pseudo_counts[names(sample_counts$OPCs),sample_counts$sample] <- sample_counts$OPCs
+}
+# Just checking if total counts are the same
+for(sample_counts in pseudo_counts_list){
+ if (!(sum(ast_pseudo_counts[,sample_counts$sample]) == sum(sample_counts$Astrocyte))){
+   print(sample_counts$sample)
+ }
+}
+
+save(ext_pseudo_counts,inh_pseudo_counts,oli_pseudo_counts,ast_pseudo_counts,mic_pseudo_counts,opc_pseudo_counts,
+    file = paste0(data_dir,"pseudo_counts.RData"))
+```
+
+## Processing the pseudo counts tables
+
+```{r message=F, warning=F, eval=F}
+library(tidyverse)
+library(rtracklayer)
+library(GenomicFeatures)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(DESeq2)
+
+# process gene and transcript annotation #####
+# Using: GENCODE v32 and GRCh38.p13
+file = "/pastel/resources/annotation/gencode.v32.primary_assembly.annotation.gtf.gz"
+
+gtf = import(file)
+gtf = as.data.frame(gtf)
+gtf %>% filter(type%in%c("transcript")) -> gtf.transcripts
+gtf %>% filter(type%in%c("gene")) -> gtf.genes
+
+txdb <- makeTxDbFromGFF(file)
+ebg <- exonsBy(txdb, by="gene") 
+exons <- reduce(ebg)
+exons <- exons[ gtf.genes$gene_id ]
+
+seqnames(Hsapiens) <- gsub("(.*?)_(.*)","\\2",gsub("v","\\.",gsub("(.*?)_(.*?)_(.*)","\\2",seqnames(Hsapiens))))
+dna <- extractTranscriptSeqs(Hsapiens, exons)
+
+gtf.genes$gc_exon <- as.numeric(letterFrequency(dna, "GC", as.prob=TRUE))
+gtf.genes$len_exon <- sum(width(ranges(exons)))
+
+# save(gtf.genes, file = "/pastel/resources/annotation/gencode.v32.primary_assembly.ann.RData")
+```
+
+From Bryois et al *medRxiv*
+
+```
+Pseudo-bulk gene expression matrices were then generated by summing all counts for each gene in each patient in each cell type and normalized by scaling the total counts per patient for each cell type to 1 million.
+```
+
+Here:
+
+1. Pseudo-bulk created by summing counts from single cell data
+2. Genes are filtered by each cell type (kept genes with CPM > 1 in 80% of samples) 
+3. Perform CQN accounting by exon length and exon gc
+4. Return matrices by Counts (raw), CPM (raw), TPM, CQN, Adj.Counts, TMM-Voom, Quantile-Voom
+
+```{r eval=F}
+library(edgeR)
+library(cqn)
+
+load("/pastel/resources/annotation/gencode.v32.primary_assembly.ann.RData")
+load(paste0(data_dir,"pseudo_counts.RData"))
+
+gtf.genes = gtf.genes %>% mutate(ensembl_id_nover = gsub("(.*)\\.(.*)","\\1",gene_id))
+
+## Batch info
+sample_batch = annotation %>% filter(projid %in% metadata_df$projid) %>% dplyr::select(projid, batch) %>% distinct() %>%
+  mutate(batch_0 = gsub("(.*)-(.*)","\\1",batch), batch_1 = gsub("(.*?)-(.*)","\\1",batch), batch_2 = gsub("(.*?)-(.*?)-(.*)","\\2",batch)) %>% distinct()
+
+pseudo_counts = list("ext" = ext_pseudo_counts,
+                     "inh" = inh_pseudo_counts,
+                     "oli" = oli_pseudo_counts,
+                     "ast" = ast_pseudo_counts,
+                     "mic" = mic_pseudo_counts,
+                     "opc" = opc_pseudo_counts)
+
+celltype_exp = list()
+for (cell_type in names(pseudo_counts)){
+  # cell_type = names(pseudo_counts)[5] # debug
+  cell_data = list()
+  
+  counts = pseudo_counts[[cell_type]]
+  
+  # Filter genes by CPM
+  counts_cpm = as.data.frame(cpm(counts))
+  keep.exp <- rowSums(counts_cpm > 1) >= (0.8 * ncol(counts_cpm) )
+  counts_cpm_filt = counts_cpm[keep.exp,]
+  counts_filt = counts[keep.exp,]
+
+  gtf.genes_filt = gtf.genes[match(rownames(counts_filt), gtf.genes$ensembl_id_nover),]
+  # all(rownames(counts_filt)==gtf.genes_filt$ensembl_id_nover) # TRUE?
+  
+  # TPM
+  tpm_x = counts_filt/gtf.genes_filt$len_exon
+  tpm = t(t(tpm_x)*1e6/colSums(tpm_x))
+  
+  sizeFactors = colSums(counts_filt, na.rm = T)
+  cqn.subset <- cqn(counts_filt, lengths = gtf.genes_filt$len_exon, x = gtf.genes_filt$gc_exon, sizeFactors = sizeFactors, verbose = TRUE)
+  RPKM.cqn.log2 <- cqn.subset$y + cqn.subset$offset
+
+  # convert to count
+  adjusted.count <- 2^RPKM.cqn.log2 * rep(colSums(counts_filt), nrow(RPKM.cqn.log2)) %>%
+    matrix(., ncol=ncol(counts_filt), nrow=nrow(counts_filt), byrow = T) 
+  adjusted.count = adjusted.count/10^6 - 1
+  adjusted.count[adjusted.count<0]=0
+  
+  # quantile-voom
+  counts_voom = voom(counts = adjusted.count, normalize.method="quantile")
+  quantile_voom = as.data.frame(counts_voom$E) 
+  
+  # TMM-voom
+  norm <- calcNormFactors(counts_filt, method = "TMM") 
+  dge = DGEList(counts_filt, norm.factors = norm)
+  counts_voom <- voom(dge)
+  tmm_voom <- as.data.frame(counts_voom$E) 
+  
+  cell_data$counts <- counts
+  cell_data$counts_cpm <- counts_cpm_filt
+  cell_data$counts_tpm <- tpm
+  cell_data$cqn <- cqn.subset
+  cell_data$RPKM.cqn.log2 <- RPKM.cqn.log2
+  cell_data$adjusted.count <- adjusted.count
+  cell_data$quantile_voom <- quantile_voom
+  cell_data$tmm_voom <- tmm_voom
+  
+  celltype_exp[[cell_type]] <- cell_data
+}
+
+save(celltype_exp, pheno.filt, annotation.filt, file = paste0(data_dir,"celltype_exp.RData"))
+```
+
+Summary based on cqn adj. counts
+
+```{r}
+load(paste0(data_dir,"celltype_exp.RData"))
+df_summary = data.frame()
+for (cell in names(celltype_exp)){
+  #cell = names(celltype_exp)[1]
+  dat = celltype_exp[[cell]]
+  dat2 = as.data.frame(dat$adjusted.count)
+  dat_df = data.frame(cell_type = cell,
+                      ngenes = nrow(dat2),
+                      nsamples = ncol(dat2),
+                      avg_libsize = mean(colSums(dat2)),
+                      avg_counts = mean(rowMeans(dat2)))
+  df_summary = rbind(df_summary, dat_df)
+}
+df_summary
+```
+
+Comparison between distributions
+
+```{r fig.width=12, fig.height=18, dpi=300}
+library(ggpubr)
+library(viridis)
+
+cell_color_map = list(ext = ggsci::pal_nejm("default")(6)[1],
+                      inh = ggsci::pal_nejm("default")(6)[2],
+                      oli = ggsci::pal_nejm("default")(6)[3],
+                      ast = ggsci::pal_nejm("default")(6)[4],
+                      mic = ggsci::pal_nejm("default")(6)[5],
+                      opc = ggsci::pal_nejm("default")(6)[6])
+cell_labels = list(ext = "Excitatory Neurons",
+                   inh = "Inhibitory Neurons",
+                   oli = "Oligodendrocytes",
+                   ast = "Astrocytes",
+                   mic = "Microglia",
+                   opc = "OPCs")
+cell_labels_n = list(ext = paste0("Excitatory Neurons (genes = ", df_summary$ngenes[df_summary$cell_type=="ext"], ")"),
+                   inh = paste0("Inhibitory Neurons (genes = ", df_summary$ngenes[df_summary$cell_type=="inh"], ")"),
+                   oli = paste0("Oligodendrocytes (genes = ", df_summary$ngenes[df_summary$cell_type=="oli"], ")"),
+                   ast = paste0("Astrocytes (genes = ", df_summary$ngenes[df_summary$cell_type=="ast"], ")"),
+                   mic = paste0("Microglia (genes = ", df_summary$ngenes[df_summary$cell_type=="mic"], ")"),
+                   opc = paste0("OPCs (genes = ", df_summary$ngenes[df_summary$cell_type=="opc"], ")"))
+
+plot_exp_density_per_sample <- function(exp_matrix, title = "", subtitle = "", x_label = "value", color = "#4DBBD5FF"){
+  #exp_matrix <- cell_type$RPKM.cqn.log2
+  exp_matrix <- as.matrix(exp_matrix)
+  nsamples <- ncol(exp_matrix)
+  colfunc <- grDevices::colorRampPalette(c(color, alpha(color, 0.5)))
+  col = alpha(colfunc(nsamples), alpha = 0.1)
+  per_sample = reshape2::melt(exp_matrix)
+  density_p <- ggplot(per_sample, aes(x=value, color=as.factor(Var2))) + 
+    geom_density(show.legend = FALSE) + 
+    scale_fill_viridis_d() +
+    scale_color_manual(values=col) +
+    labs(x = x_label, y = "Density", title = title, subtitle = subtitle) +
+    theme_classic()
+  return(density_p)
+}
+
+dist_plots = list()
+for(cell_type_i in names(celltype_exp)){
+  #cell_type_i = names(celltype_exp)[5] # debug
+  cell_type <- celltype_exp[[cell_type_i]]
+  a1 = plot_exp_density_per_sample(log2(cell_type$counts_cpm+1), subtitle = cell_labels_n[[cell_type_i]], x_label = expression(log[2]("CPM + 1")), color = cell_color_map[[cell_type_i]])
+  a2 = plot_exp_density_per_sample(log2(cell_type$counts_tpm+1), subtitle = cell_labels_n[[cell_type_i]], x_label = expression(log[2](TPM + 1)), color = cell_color_map[[cell_type_i]])
+  a3 = plot_exp_density_per_sample(cell_type$RPKM.cqn.log2, subtitle = cell_labels_n[[cell_type_i]], x_label = expression(log[2]("RPKM CQN")), color = cell_color_map[[cell_type_i]])
+  a4 = plot_exp_density_per_sample(cell_type$tmm_voom, subtitle = cell_labels_n[[cell_type_i]], x_label = expression("tmm-voom"), color = cell_color_map[[cell_type_i]])
+  dist_plots[[cell_type_i]] <- ggarrange(a1,a2,a3,a4, nrow = 1, ncol = 4)
+}
+
+ggarrange(plotlist = dist_plots, nrow = 6, ncol = 1, labels = "auto")
+```
+
+## Session info
+
+```{r}
+sessionInfo()
+```

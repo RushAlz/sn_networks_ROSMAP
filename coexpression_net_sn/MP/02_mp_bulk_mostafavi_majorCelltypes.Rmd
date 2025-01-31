@@ -1,0 +1,215 @@
+---
+title: "Single nuclei RNASeq from DLPFC"
+subtitle: "Module preservation"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo A. Vialle
+ | Shinya Tasaki
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+> Approach: Major cell types (level 3) vs Mostafavi vs MF 
+
+Previous script: 01_prepare_input.R
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(limma)
+library(tidyverse)
+library(WGCNA)
+library(ggrepel)
+library(ggpubr)
+library(ggeasy)
+library(dplyr)
+library(SummarizedExperiment)
+```
+
+```{r Helper Functions, echo=FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+
+work_dir = "/pastel/Github_scripts/SpeakEasy_dlpfc/sn_dlpfc/2nd_pass/module_preservation_sn/mp_major_celltypes_mostafavi_mf/" # to save the results 
+```
+
+```{r eval=T}
+# Reference: Dataset 01 
+# Test: Dataset 02
+# Rationale: Are the modules from the **Reference** networks preserved in the **Test** data set?
+
+### SET PARAMETERS
+
+snakemake_sn_input_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_singlenuclei/2nd_pass/snakemake-sn/input/"
+snakemake_sn_output_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_singlenuclei/2nd_pass/snakemake-sn/results/"
+cluster_lv = "3"
+numthreads = 2
+
+cell_ids = c("ast", "mic", "oli", "end", "opc", "ext", "inh", "Sara", "bulk_MF")
+nSets = length(cell_ids)
+```
+
+```{r eval=F}
+# Heavy chunk. Calculate pairwise module preservation stats
+multiExpr = list()
+multiColor = list()
+for (set in 1:nSets) {
+  message(paste("Working on set:", cell_ids[set]))
+  # Residuals of the expression: 
+  res_dataset_01 = read.table(paste0(snakemake_sn_input_dir, cell_ids[set], ".txt"), header = T, check.names = F, stringsAsFactors = F)
+  res_dataset_01 = as.data.frame(t(res_dataset_01))
+  # clusters from SpeakEasy: 
+  k_dataset_01 = read.table(paste0(snakemake_sn_output_dir, cell_ids[set], "/geneBycluster.txt"), header = T, stringsAsFactors = F) 
+  k_dataset_01$ensembl = gsub("(.*)\\.(.*)","\\1",k_dataset_01$ensembl)
+  # Match and sort genes in Reference modules 
+  k_dataset_01.match = k_dataset_01 %>% filter(ensembl %in% colnames(res_dataset_01))
+  k_dataset_01.match = k_dataset_01.match[match(colnames(res_dataset_01), k_dataset_01.match$ensembl),]
+  
+  multiExpr[[set]] = list(data = res_dataset_01)
+  multiColor[[set]] = paste0("M", k_dataset_01.match[,paste0("cluster_lv",cluster_lv)])
+}
+names(multiExpr) = cell_ids
+names(multiColor) = cell_ids
+
+# Here comes the calculation of module preservation, it takes a week for the SN dataset 
+enableWGCNAThreads(nThreads = numthreads)
+system.time( {
+mp = modulePreservation(multiExpr, multiColor, 
+                        dataIsExpr = T,
+                        networkType = "unsigned", # default: unsigned 
+                        referenceNetworks = c(1:nSets), 
+                        maxModuleSize = 20000,
+                        maxGoldModuleSize = 500, 
+                        nPermutations = 200, # Default = 200
+                        quickCor = 1,
+                        randomSeed = 2022,
+                        parallelCalculation = T,
+                        verbose = 4)
+} )
+
+# Save the results
+save(mp, file = paste0(work_dir, "mp_sn_mf_sara.RData"))
+```
+
+```{r}
+load(file = paste0(work_dir, "mp_sn_mf_sara.RData"))
+cell_ids = c("ast", "mic", "oli", "end", "opc", "ext", "inh", "Sara", "bulk_MF")
+nSets = length(cell_ids)
+
+res_all = data.frame()
+for (ref in 1:nSets) {
+  for (test in 1:nSets) {
+    if(ref!=test){
+      statsObs = cbind(mp$quality$observed[[ref]][[test]][,-1], mp$preservation$observed[[ref]][[test]][,-1])
+      statsObs$module_id = rownames(statsObs)
+  
+      statsZ = cbind(mp$quality$Z[[ref]][[test]], mp$preservation$Z[[ref]][[test]][,-1])
+      statsZ$module_id = rownames(statsZ)
+  
+      res_df = statsObs %>% dplyr::left_join(statsZ, by = c("module_id"))
+      res_df$ref = cell_ids[ref]
+      res_df$test = cell_ids[test]
+      rownames(res_df) = NULL
+      
+      #res_df2 = cbind(statsObs[, c("medianRank.pres", "medianRank.qual")], signif(statsZ[, c("Zsummary.pres", "Zsummary.qual")], 2))
+      #res_df2$ref = cell_ids[ref]
+      #res_df2$test = cell_ids[test]
+      
+      res_all = bind_rows(res_all,res_df)
+    }
+  }
+}
+
+res_final = res_all[,c("module_id","moduleSize","ref","test",colnames(res_all)[!colnames(res_all) %in% c("module_id","moduleSize","ref","test")])]
+createDT(res_final)
+
+```
+
+```{r plot1, fig.width=30, fig.height=44, warning=FALSE}
+p <- ggplot(res_final %>% filter(moduleSize >= 30), aes(x = moduleSize, y = Zsummary.pres )) + 
+  geom_hline(yintercept = c(2,10), linetype = "dashed") +
+  geom_point(shape = 21) +
+  geom_label_repel(aes(label = module_id), max.overlaps = 25) +
+#  geom_label(aes(label = module_id)) +
+  labs(y = "Preservation Zsummary", x = "Module size", title = "Preservation Zsummary") +
+  theme_classic() +
+  facet_wrap(~ref+test, scales = "free", ncol = 7)
+
+# pdf(file = paste0(work_dir, "h_fisher_mp_majorcells_sn.pdf"), width = 30, height = 40)
+# p
+# dev.off()
+
+p
+```
+
+```{r plot2, fig.width=5, fig.height=4, warning=FALSE}
+#res_final %>% select(module_id,ref,test,Zsummary.pres) %>% mutate(id = paste(ref,module_id,sep = "_")) %>%
+#  pivot_wider(id_cols = id, names_from = test, values_from = Zsummary.pres)
+
+res_mtx_sum = res_final %>% filter(moduleSize >= 30) %>% select(module_id,ref,test,Zsummary.pres) %>% mutate(id = paste(ref,module_id,sep = "_")) %>%
+  pivot_wider(id_cols = ref, names_from = test, values_from = Zsummary.pres, values_fn = function(x) sum(x<2, na.rm = T)) %>% column_to_rownames("ref")
+res_mtx_sum = res_mtx_sum[,rownames(res_mtx_sum)]
+
+suppressPackageStartupMessages(library(ComplexHeatmap))
+library(leaflet)
+
+my.breaks <- c(seq(0, max(res_mtx_sum, na.rm = T), by=1))
+my.colors <- colorBin("Spectral", bins = my.breaks, na.color = "#aaff56", reverse = T, pretty = T)
+
+draw_colnames_45 <- function (coln, gaps, ...) {
+    coord <- pheatmap:::find_coordinates(length(coln), gaps)
+    x     <- coord$coord - 0.5 * coord$size
+    res   <- grid::textGrob(
+      coln, x = x, y = unit(1, "npc") - unit(3,"bigpts"),
+      vjust = 0.75, hjust = 1, rot = 90, gp = grid::gpar(...)
+    )
+    return(res)
+}
+assignInNamespace(
+  x = "draw_colnames",
+  value = "draw_colnames_45",
+  ns = asNamespace("pheatmap")
+)
+
+(p_heat = Heatmap(res_mtx_sum, 
+                  cluster_columns = F, cluster_rows = F, 
+        heatmap_legend_param = list(title = "# modules Zsum<2"),
+        row_names_gp = gpar(fontsize = 10), column_names_gp = gpar(fontsize = 10),
+        column_title = "Test set", 
+        row_title = "Reference set",
+        col = my.colors(my.breaks), 
+        rect_gp = gpar(col = "gray", lwd = .8),
+        cell_fun = function(j, i, x, y, w, h, col) { # add text to each grid
+            grid.text(sprintf("%d", res_mtx_sum[i,j]), x, y, gp = gpar(fontsize = 8))
+          }
+        ))
+```
+
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,150 @@
+---
+title: "Single-nuclei"
+subtitle: "SpeakEasy networks"
+author:  |
+ | Katia de Paiva Lopes 
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+> Functional Enrichment Analysis | Tool: gprofileR | Let's put it all together! 
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(plyr)
+library(dplyr)
+
+knitr::opts_chunk$set( 
+  warning=FALSE,
+  message=FALSE,
+  results = 'asis',
+  error = FALSE,
+  tidy = FALSE,
+  fig.show = "hold")
+```
+
+```{r Helper Functions, echo=FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+```
+
+```{r folders, echo=TRUE, message=TRUE}
+fea_output = "/pastel/Github_scripts/SpeakEasy_dlpfc/sn_dlpfc/2nd_pass/FEA/gprofiler/"
+```
+
+Previous script is [here](https://rushalz.github.io/SpeakEasy_dlpfc/sn_dlpfc/2nd_pass/FEA/gprofiler/Report_gprofiler_cl3_ext.html). 
+
+# Read the Rdatas
+```{r input}
+load(paste0(fea_output, "gprofiler_end.Rdata"))
+g_res_end <- ldply(output_df, data.frame) # like rbind 
+g_res_end$net = "end"
+rm(output_df)
+
+load(paste0(fea_output, "gprofiler_opc.Rdata"))
+g_res_opc <- ldply(output_df, data.frame) # like rbind 
+g_res_opc$net = "opc"
+rm(output_df)
+
+load(paste0(fea_output, "gprofiler_mic.Rdata"))
+g_res_mic <- ldply(output_df, data.frame) 
+g_res_mic$net = "mic"
+rm(output_df)
+
+load(paste0(fea_output, "gprofiler_ast.Rdata"))
+g_res_ast <- ldply(output_df, data.frame) 
+g_res_ast$net = "ast"
+rm(output_df)
+
+load(paste0(fea_output, "gprofiler_oli.Rdata"))
+g_res_oli <- ldply(output_df, data.frame) 
+g_res_oli$net = "oli"
+rm(output_df)
+
+load(paste0(fea_output, "gprofiler_inh.Rdata"))
+g_res_inh <- ldply(output_df, data.frame) 
+g_res_inh$net = "inh"
+rm(output_df)
+
+load(paste0(fea_output, "gprofiler_ext.Rdata"))
+g_res_ext <- ldply(output_df, data.frame) 
+g_res_ext$net = "ext"
+rm(output_df)
+
+g_all = rbind(g_res_end, g_res_opc, g_res_mic, g_res_ast, g_res_oli, g_res_inh, g_res_ext)
+g_all$module = paste0(g_all$net,"_", g_all$query)
+g_all$.id = NULL
+length(unique(g_all$module)) # 190
+
+message(paste0("Number of modules enriched: ", length(unique(g_all$module)))) 
+```
+
+# 1 cell type
+Term present in one cell type 
+```{r fea1}
+g_all$term_clean = g_all$term_name
+g_all$term_clean = ifelse(grepl("immune",tolower(g_all$term_clean)),"immune",g_all$term_clean)
+g_all$term_clean = ifelse(grepl("phagocytosis",tolower(g_all$term_clean)),"phagocytosis",g_all$term_clean)
+g_all$term_clean = ifelse(grepl("mitoch",tolower(g_all$term_clean)),"mitochondria",g_all$term_clean)
+g_all$term_clean = ifelse(grepl("ribosom",tolower(g_all$term_clean)),"ribosome",g_all$term_clean)
+g_all$term_clean = ifelse(grepl("proteaso",tolower(g_all$term_clean)),"proteasome",g_all$term_clean)
+g_all$term_clean = ifelse(grepl("protein transport",tolower(g_all$term_clean)),"protein transport",g_all$term_clean)
+g_all$term_clean = ifelse(grepl("golgi",tolower(g_all$term_clean)),"golgi",g_all$term_clean)
+g_all$term_clean = ifelse(grepl("mapk",tolower(g_all$term_clean)),"MAPK",g_all$term_clean)
+
+g_all_filt <- g_all %>% filter(source %in% c(
+  "WP"
+  ,"KEGG"
+  ,"REAC"
+  ,"GO:BP"
+  ,"GO:MF"
+  ,"GO:CC"
+  )) %>% 
+  group_by(term_clean) %>% 
+  dplyr::summarise(n_modules = length(unique(module)), 
+                   n_cell = length(unique(net)), 
+                   celltypes = paste(unique(net),collapse = ";")) %>% 
+  arrange(n_modules) 
+
+# One cell type only 
+createDT(g_all_filt %>%
+  filter(n_cell == 1))
+```
+
+# 2 cell types
+```{r fea2}
+createDT(g_all_filt %>%
+           filter(n_cell == 2))
+```
+
+# 7 cell types
+```{r fea7}
+createDT(g_all_filt %>%
+           filter(n_cell == 7))
+```
+
+# Session info
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,142 @@
+---
+title: "SpeakEasy clusters"
+subtitle: "Region: MF"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo A. Vialle
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+> Tool: gprofileR
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(gprofiler2)
+library(knitr)
+library(plotly)
+library(DT)
+
+knitr::opts_chunk$set( 
+  warning=FALSE,
+  message=FALSE,
+  results = 'asis',
+  error = FALSE,
+  tidy = FALSE,
+  fig.show = "hold")
+```
+
+```{r Helper Functions, echo=FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+```
+
+```{r folders, echo=TRUE}
+net_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_net_MF/"
+fea_output = "/pastel/Github_scripts/SpeakEasy_dlpfc/bulk_dlpfc/FEA_analysis/gprofiler/"
+
+modules_file = read.table(paste0(net_dir, "geneBycluster.txt"), header = T)
+```
+
+# Enrichment Level 03
+We removed the clusters with < 30 nodes for downstream analysis. 
+```{r input, echo=TRUE}
+modules_file = modules_file[, c("symbol", "cluster_lv3")]
+modules_file$module_clusters = paste0("m", modules_file$cluster_lv3)
+modules_file$cluster_lv3 = NULL
+
+modules_size = as.data.frame(table(modules_file$module_clusters))
+colnames(modules_size) = c("module", "n_nodes")
+createDT(modules_size)
+```
+
+# Module enrichment L3 {.tabset .tabset-fade}
+```{r echo=FALSE, results='asis', fig.keep='all', message = FALSE, warning = FALSE}
+too_small = as.character( modules_size$module[modules_size$n_nodes < 30]) # Get modules < 30 nodes to be removed
+clusters_list = as.character(unique(modules_file$module_clusters))
+clusters_list = clusters_list[!clusters_list %in% too_small]
+
+# Build list of outputs
+output <- list()
+output_df = list()
+for(i in 1:length(clusters_list)){
+  m_cluster = clusters_list[i]
+  module <- subset(modules_file, modules_file$module_clusters==m_cluster, select = c("symbol"))
+  gostres <- gost(query = module$symbol, organism = "hsapiens", correction_method = "gSCS", significant = TRUE, user_threshold = 0.05)
+  if (!is.null(gostres)){
+    gostres$result$query = m_cluster
+    gprofiler_results_m = gostres$result
+    output_df[[m_cluster]] <- gprofiler_results_m
+    # Header for iteration
+    txt <- paste0("## Module ", m_cluster)
+    output[[length(output) + 1L]] <- txt
+    # Plot
+    plt <- gostplot(gostres)
+    output[[length(output) + 1L]] <- plt
+    # Table of the first few lines
+    tbl <- createDT(gprofiler_results_m)
+    output[[length(output) + 1L]] <- tbl
+  }
+}
+# Render the outputs
+for(j in 1:length(output)){
+  x <- output[[j]]
+  if(inherits(x, "character")){
+    cat("\n")
+    cat(x)
+  } else if(inherits(x, "knitr_kable")){
+    cat("\n")
+    print(x)
+  }
+  else {
+    # print the html piece of the htmlwidgets
+    cat("\n")
+    cat(htmltools::renderTags(as.widget(x))$html)
+  }
+}
+
+#Save for downstream
+save(output_df, file = paste0(fea_output, "gprofiler_MF.Rdata"))
+```
+
+```{r echo=FALSE, messages=FALSE, warning=FALSE}
+# Attach the Dependencies since they do not get included with renderTags(...)$html
+deps <- lapply(
+  Filter(f = function(x){inherits(x,"htmlwidget")}, x = output),
+  function(hw){
+    htmltools::renderTags(hw)$dependencies
+  }
+)
+htmltools::attachDependencies(x = htmltools::tagList(), value = unlist(deps,recursive=FALSE))
+```
+
+# Session info
+```{r session_v, echo=TRUE}
+sessionInfo()
+```

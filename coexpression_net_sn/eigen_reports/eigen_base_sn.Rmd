@@ -1,0 +1,102 @@
+---
+title: "Single nuclei from DLPFC"
+subtitle: "Module Eigengene and Average expression"
+author:  |
+ | Katia de Paiva Lopes 
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+params:
+  cell_type: "mic"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+# rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(tidyverse)
+library(janitor)
+library(readxl)
+library(WGCNA)
+
+net_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_singlenuclei/2nd_pass/snakemake-sn/results/"
+work_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_singlenuclei/2nd_pass/snakemake-sn/"
+expression_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_singlenuclei/2nd_pass/snakemake-sn/input/"
+```
+
+```{r Helper Functions, echo=FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+```
+
+## Input 
+In order to summarize the SE network information we will perform the module eigengene approach. Module eigengene is defined as the first principal component of the expression matrix of the corresponding module.
+
+```{r input}
+macro_type = params$cell_type #macro_structure. It can be cell_type, metabolites, region of the brain. 
+message(paste0("Cell type: ", macro_type))
+
+# Expression data for a single set in the form of a data frame where rows are samples and columns are genes (probes):
+exprData = read.table(paste0(expression_dir, macro_type, ".txt"), header = T, stringsAsFactors = F, check.names = F) # Results of the expression
+expr_matx_t = as.data.frame( t(exprData)) # Residuals of the expression
+
+# Gene by module
+gene_mod = read.table(paste0(net_dir, macro_type, "/geneBycluster.txt"), header = T, stringsAsFactors = F) # clusters from SpeakEasy
+
+k_dataset_ord = gene_mod[match(colnames(expr_matx_t), gene_mod$ensembl), ] #order the matrices 
+all(colnames(expr_matx_t) == k_dataset_ord$ensembl) # must be true 
+
+```
+
+## Module eigengenes - Lv3
+Showing the module eigengenes in a dataframe, with each column corresponding to one eigengene. 
+```{r eigen}
+colors = k_dataset_ord$cluster_lv3
+lv3_moduleEigengenes = moduleEigengenes(expr_matx_t, colors, verbose = 0)
+
+# save results
+save(lv3_moduleEigengenes, file = paste0(net_dir, macro_type,"/", "lv3_moduleEigengenes.Rdata"))
+write.table(lv3_moduleEigengenes$eigengenes, file = paste0(net_dir, macro_type,"/", "lv3_moduleEigengenes.txt"), sep = "\t", quote = F, row.names = T)
+
+createDT(lv3_moduleEigengenes$eigengenes)
+```
+
+## Average expression - Lv3
+A dataframe containing average normalized expression in each module. 
+```{r ave}
+# The columns are named by the corresponding color with an "AE" prepended, e.g., AEturquoise etc.
+colnames(lv3_moduleEigengenes$averageExpr) = gsub("AE", "AE_M", colnames(lv3_moduleEigengenes$averageExpr))
+write.table(lv3_moduleEigengenes$averageExpr, file = paste0(net_dir, macro_type,"/", "lv3_averageExpr.txt"), sep = "\t", quote = F, row.names = T)
+createDT(lv3_moduleEigengenes$averageExpr)
+```
+
+---
+
+## Session info
+
+```{r}
+sessionInfo()
+```

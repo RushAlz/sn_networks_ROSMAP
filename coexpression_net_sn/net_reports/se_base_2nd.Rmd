@@ -1,0 +1,132 @@
+---
+title: "Single nuclei RNASeq from DLPFC"
+subtitle: "Networks"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo A. Vialle
+ | Shinya Tasaki
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+params:
+  cell_type: "ast"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(ggfortify)
+library(limma)
+library(tidyverse)
+library(R.matlab)
+library(kableExtra)
+library(readxl) 
+library(ggeasy)
+```
+
+```{r Helper Functions, echo=FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+```
+
+```{r resources, echo=TRUE}
+net_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_singlenuclei/2nd_pass/snakemake-sn/results/"
+```
+
+# Clusters with gene_names
+```{r read_results, warning=FALSE}
+macro_type = params$cell_type #macro_structure. It can be cell_type, metabolites, region of the brain. 
+message(paste0("Cell type: ", macro_type))
+min_clust = 30
+cluster_codes_df = read.table(paste0(net_dir, "/", macro_type, "/geneBycluster.txt"), header = T, check.names = F, stringsAsFactors = F)
+message(paste0("Number of unique genes: ", length(unique(cluster_codes_df$ensembl))))
+
+createDT(cluster_codes_df)
+```
+
+# Number of genes by cluster
+## Clusters level 1
+```{r lv1, message=TRUE}
+count1 = as.data.frame(table(cluster_codes_df$cluster_lv1))
+colnames(count1) = c("cluster", "n_nodes")
+total_nodes = sum(count1$n_nodes)
+nodes_in_cluster = sum(count1$n_nodes[count1$n_nodes >= min_clust])
+message(paste0("Number of clusters with at least 30 nodes: "), length(count1$cluster[count1$n_nodes > min_clust])) # 30 in this case    
+message(paste0("Number of genes assigned in clusters with at least 30 nodes: "), nodes_in_cluster, ". Percentage: ", (nodes_in_cluster/total_nodes)*100, "% of the genes are assigned to a cluster.")
+
+createDT(count1) 
+```
+
+## Clusters level 2
+```{r lv2, message=TRUE}
+count2 = as.data.frame(table(cluster_codes_df$cluster_lv2))
+colnames(count2) = c("cluster", "n_nodes")
+total_nodes = sum(count2$n_nodes)
+nodes_in_cluster = sum(count2$n_nodes[count2$n_nodes >= min_clust])
+message(paste0("Number of clusters with at least 30 nodes: "), length(count2$cluster[count2$n_nodes >= min_clust]))  
+message(paste0("Number of genes assigned in clusters with at least 30 nodes: "), nodes_in_cluster, ". Percentage: ", (nodes_in_cluster/total_nodes)*100, "% of the genes are assigned to a cluster.")
+
+createDT(count2) 
+```
+
+## Clusters level 3
+```{r lv3, message=TRUE}
+count3 = as.data.frame(table(cluster_codes_df$cluster_lv3))
+colnames(count3) = c("cluster", "n_nodes")
+total_nodes = sum(count3$n_nodes)
+nodes_in_cluster = sum(count3$n_nodes[count3$n_nodes >= min_clust])
+message(paste0("Number of clusters with at least 30 nodes: "), length(count3$cluster[count3$n_nodes >= min_clust])) # 30 in this case    
+message(paste0("Number of genes assigned in clusters with at least 30 nodes: "), nodes_in_cluster, ". Percentage: ", (nodes_in_cluster/total_nodes)*100, "% of the genes are assigned to a cluster.")
+
+createDT(count3) 
+```
+
+## Clusters level 4
+```{r lv4, message=TRUE}
+count4 = as.data.frame(table(cluster_codes_df$cluster_lv4))
+colnames(count4) = c("cluster", "n_nodes")
+total_nodes = sum(count4$n_nodes)
+nodes_in_cluster = sum(count4$n_nodes[count4$n_nodes >= min_clust])
+message(paste0("Number of clusters with at least 30 nodes: "), length(count4$cluster[count4$n_nodes >= min_clust])) # 30 in this case    
+message(paste0("Number of genes assigned in clusters with at least 30 nodes: "), nodes_in_cluster, ". Percentage: ", (nodes_in_cluster/total_nodes)*100, "% of the genes are assigned to a cluster.")
+
+createDT(count4) 
+```
+
+## Clusters level 5
+```{r lv5, message=TRUE}
+count5 = as.data.frame(table(cluster_codes_df$cluster_lv5))
+colnames(count5) = c("cluster", "n_nodes")
+total_nodes = sum(count5$n_nodes)
+nodes_in_cluster = sum(count5$n_nodes[count5$n_nodes >= min_clust])
+message(paste0("Number of clusters with at least 30 nodes: "), length(count5$cluster[count5$n_nodes >= min_clust])) # 30 in this case    
+message(paste0("Number of genes assigned in clusters with at least 30 nodes: "), nodes_in_cluster, ". Percentage: ", (nodes_in_cluster/total_nodes)*100, "% of the genes are assigned to a cluster.")
+
+createDT(count5) 
+```
+
+## Session info
+```{r}
+sessionInfo()
+```
+
+

@@ -1,0 +1,253 @@
+---
+title: "Module Preservation"
+subtitle: "Regions: MF vs Mostafavi"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo A. Vialle
+ | Shinya Tasaki
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+> Module Preservation | Approach: MF vs Mostafavi 
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(limma)
+library(tidyverse)
+library(WGCNA)
+library(ggrepel)
+library(ggpubr)
+library(ggeasy)
+library(dplyr)
+library(SummarizedExperiment)
+```
+
+```{r Helper Functions, echo=FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+
+work_dir = "/pastel/Github_scripts/SpeakEasy_dlpfc/bulk_dlpfc/module_preservation/bulk_vs_mostafavi/MF_Mostafavi_2/"
+```
+
+Pairwise comparisons
+
+# MF and Mostafavi
+
+```{r input_datasets, eval=T}
+# Input: expression matrix and modules
+########## Dataset 01 
+dir_expr_01 = "/pastel/projects/speakeasy_dlpfc/"
+dir_mod_01 = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_net_MF/"
+
+# Residuals of the expression: 
+load(paste0(dir_expr_01, "exprdata_byregion.Rdata")) 
+res_dataset_01 = exprData_MF # Residuals of the expression
+res_dataset_01 = as.data.frame(t(res_dataset_01))
+# Remove ENS version
+colnames(res_dataset_01) = gsub("(.*)\\.(.*)", "\\1", colnames(res_dataset_01))
+rownames(res_dataset_01) = gsub("(.*)_(.*)", "\\2", rownames(res_dataset_01))
+
+# clusters from SpeakEasy: 
+k_dataset_01 = read.table(paste0(dir_mod_01, "geneBycluster.txt"), header = T, stringsAsFactors = F) 
+k_dataset_01$ensembl = gsub("(.*)\\.(.*)", "\\1", k_dataset_01$ensembl)
+
+# Checking order
+# all(k_dataset_01$ensembl == colnames(res_dataset_01))
+modules_dataset_01 = setNames(k_dataset_01$cluster_lv3, k_dataset_01$ensembl)
+# all(names(modules_dataset_01) == colnames(res_dataset_01))
+# dim(res_dataset_01) # 1210 17309
+# length(modules_dataset_01) # 17309
+
+## Dataset 1 is ready!
+
+########## Dataset 02
+dir_expr_02 = "/pastel/projects/speakeasy_dlpfc/mostafavi/"
+dir_mod_02 = "/pastel/projects/speakeasy_dlpfc/mostafavi/"
+
+dat = read_rds(paste0(dir_expr_02, "DLPFC_gene_sara_v1.rds"))
+exp_mat = assay(dat) %>% as.data.frame()
+sample_meta = colData(dat) %>% as.data.frame()
+gene_meta = elementMetadata(dat) %>% as.data.frame()
+
+colnames(exp_mat) = gsub("(.*)\\:(.*)","\\1",colnames(exp_mat)) # Fix projIds
+
+# Match expression with genes with modules 
+k_dataset_02 = read.table(paste0(dir_mod_02, "mRNA_annotation.txt"), header = F, stringsAsFactors = F)
+colnames(k_dataset_02) = c("symbol", "cluster", "ensembl")
+# length(k_dataset_02$symbol[k_dataset_02$cluster == 109]) # 390 genes
+# dim(k_dataset_02) 
+# dim(exp_mat) 
+# Rownames in exp_mat has ensembl ID version
+# sum(duplicated(gsub("(.*)\\.(.*)","\\1",rownames(exp_mat)))) # No duplicates
+rownames(exp_mat) = gsub("(.*)\\.(.*)","\\1",rownames(exp_mat))
+
+genes_in_common_testset = intersect(rownames(exp_mat),k_dataset_02$ensembl)
+# length(genes_in_common_testset)
+k_dataset_02 = k_dataset_02[match(genes_in_common_testset,k_dataset_02$ensembl),]
+exp_mat = exp_mat[match(genes_in_common_testset,rownames(exp_mat)),]
+# all(rownames(exp_mat)==k_dataset_02$ensembl)
+# dim(k_dataset_02)
+
+# Mostafavi's matrix has ensembl. We need to match both 
+res_dataset_02 = na.omit(as.data.frame(t(data.matrix(exp_mat))))
+colnames(res_dataset_02) = k_dataset_02[match(colnames(res_dataset_02),k_dataset_02$ensembl),"ensembl"] # it can be symbol as in the ST data
+# all(k_dataset_02$ensembl == colnames(res_dataset_02))
+modules_dataset_02 = setNames(k_dataset_02$cluster, k_dataset_02$ensembl)
+# all(names(modules_dataset_02) == colnames(res_dataset_02))
+
+# dim(res_dataset_02) # 508 13412
+# length(modules_dataset_02) # 13412
+# Mostafavi's data is ready!
+```
+
+```{r heavy_chunck, eval=FALSE}
+### Now data is ready to run
+## Input: 
+# res_dataset_01: expression matrix from dataset 01 (rows are samples, columns are genes) 
+# modules_dataset_01: modules from dataset 01 (named array with module labels matching columns from res_dataset_01)
+# prefix_dataset_01: Some ID to add to module lables (e.g. MF_)
+# res_dataset_02: expression matrix from dataset 02 (rows are samples, columns are genes) 
+# modules_dataset_02: modules from dataset 02 (named array with module labels matching columns from res_dataset_02)
+# prefix_dataset_02: Some ID to add to module lables (e.g. MF_)
+
+prefix_dataset_01 = "MF_"
+prefix_dataset_02 = "Sara_M"
+# Add module prefix
+modules_dataset_01 = paste0(prefix_dataset_01, modules_dataset_01)
+modules_dataset_02 = paste0(prefix_dataset_02, modules_dataset_02)
+
+setLabels = c("dataset_01", "dataset_02")
+multiExpr = list(dataset_01 = list(data = res_dataset_01), dataset_02 = list(data = res_dataset_02))
+multiColor = list(dataset_01 = modules_dataset_01, dataset_02 = modules_dataset_02)
+
+# Here comes the calculation of module preservation, it takes a while (will test both directions)
+enableWGCNAThreads(nThreads = 8)
+system.time( {
+  mp = modulePreservation(multiExpr, multiColor, dataIsExpr = T,
+                          maxModuleSize = 20000,
+                          referenceNetworks = c(1,2), # Will first test set 1 as reference, then set 2 as reference.
+                          nPermutations = 200, # Default = 200
+                          randomSeed = 2023,
+                          quickCor = 1, # 0 is suppose to be more precise but we get high Zsummary like 200 instead of 20
+                          verbose = 3,
+                          parallelCalculation = T)
+} )
+
+####################
+ref = 1 # MF
+test = 2 # Mostafavi
+
+statsObs_12 = cbind(Refence = "MF", Test = "Mostafavi", mp$quality$observed[[ref]][[test]][,-1], mp$preservation$observed[[ref]][[test]][,-1])
+statsObs_12$module_id = rownames(statsObs_12)
+
+statsZ_12 = cbind(mp$quality$Z[[ref]][[test]], mp$preservation$Z[[ref]][[test]][,-1])
+statsZ_12$module_id = rownames(statsZ_12)
+
+res_df_12 = statsObs_12 %>% dplyr::left_join(statsZ_12, by = c("module_id"))
+
+####################
+ref = 2 # Mostafavi
+test = 1 # MF
+
+statsObs_21 = cbind(Refence = "Mostafavi", Test = "MF", mp$quality$observed[[ref]][[test]][,-1], mp$preservation$observed[[ref]][[test]][,-1])
+statsObs_21$module_id = rownames(statsObs_21)
+
+statsZ_21 = cbind(mp$quality$Z[[ref]][[test]], mp$preservation$Z[[ref]][[test]][,-1])
+statsZ_21$module_id = rownames(statsZ_21)
+
+res_df_21 = statsObs_21 %>% dplyr::left_join(statsZ_21, by = c("module_id"))
+
+####################
+res_df = bind_rows(res_df_12, res_df_21)
+
+# Save the results
+save(mp,res_df,res_df_12,res_df_21, file = paste0(work_dir, "mp_MF_mostafavi.RData"))
+```
+
+```{r load_mp}
+load(paste0(work_dir, "mp_MF_mostafavi.RData"))
+
+createDT(res_df)
+```
+
+Question: Are the modules from MF preserved in Mostafavi network? 
+
+Reference: Dataset 01 (MF) 
+Test: Dataset 02 (Mostafavi)
+
+```{r plot1, fig.width=10, fig.height=6, warning=FALSE}
+# Compare preservation to qualit (generates a table)
+p_medianrank <- ggplot(res_df_12, aes(x = moduleSize, y = medianRank.pres )) +
+  geom_point(shape = 21) +
+  geom_label_repel(aes(label = module_id)) +
+  scale_y_reverse() +
+  labs(y = "Preservation Median rank", x = "Module size", title = "Preservation Median rank") +
+  theme_classic()
+
+p_zsummary <- ggplot(res_df_12, aes(x = moduleSize, y = Zsummary.pres )) + 
+  geom_hline(yintercept = c(2,10), linetype = "dashed") +
+  geom_point(shape = 21) +
+  geom_label_repel(aes(label = module_id)) +
+  labs(y = "Preservation Zsummary", x = "Module size", title = "Preservation Zsummary") +
+  theme_classic()
+
+# Plot the REFERENCE 
+ggarrange(p_medianrank, p_zsummary, ncol=2)
+```
+
+Question: Are the modules from Mostafavi preserved at the MF network? 
+
+Reference: Dataset 02 
+Test: Dataset 01
+
+```{r plot2, fig.width=10, fig.height=8, warning=FALSE}
+# Compare preservation to qualit (generates a table)
+p_medianrank <- ggplot(res_df_21, aes(x = moduleSize, y = medianRank.pres )) +
+  geom_point(shape = 21) +
+  geom_label_repel(aes(label = module_id)) +
+  scale_y_reverse() +
+  labs(y = "Preservation Median rank", x = "Module size", title = "Preservation Median rank") +
+  theme_classic()
+
+p_zsummary <- ggplot(res_df_21, aes(x = moduleSize, y = Zsummary.pres )) + 
+  geom_hline(yintercept = c(2,10), linetype = "dashed") +
+  geom_point(shape = 21) +
+  geom_label_repel(aes(label = module_id), max.overlaps = 20) +
+  labs(y = "Preservation Zsummary", x = "Module size", title = "Preservation Zsummary") +
+  theme_classic()
+
+# Plot the REFERENCE 
+ggarrange(p_medianrank, p_zsummary, ncol=2)
+```
+
+# Session info
+```{r}
+sessionInfo()
+```

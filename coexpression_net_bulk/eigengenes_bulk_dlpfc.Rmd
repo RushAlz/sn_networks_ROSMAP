@@ -1,0 +1,114 @@
+---
+title: "SpeakEasy clusters: MF"
+subtitle: "Eigengene calculation"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo A. Vialle
+ | Shinya Tasaki
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+> SpeakEasy code from [Gaiteri et al, 2015.](https://www.nature.com/articles/srep16361)
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r Helper Functions, echo = FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+```
+
+```{r load_packages, message=F, warning=F}
+library(tidyverse)
+library(janitor)
+library(readxl)
+library(WGCNA)
+
+net_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_net_MF/"
+expression_dir = "/pastel/projects/speakeasy_dlpfc/"
+dir_mod_02 = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_net_MF/"
+```
+
+## Input 
+In order to summarize the SE network information we will perform the module eigengene approach. Module eigengene is defined as the first principal component of the expression matrix of the corresponding module.
+
+```{r input}
+load(paste0(expression_dir, "exprdata_byregion.Rdata")) 
+
+# Expression data for a single set in the form of a data frame where rows are samples and columns are genes (probes):
+expr_matx_t = as.data.frame( t(exprData_MF)) # Residuals of the expression
+k_dataset_02 = read.table(paste0(dir_mod_02, "geneBycluster.txt"), header = T, stringsAsFactors = F) # clusters from SpeakEasy
+k_dataset_ord = k_dataset_02[match(colnames(expr_matx_t), k_dataset_02$ensembl), ] #order the matrices 
+# all(colnames(expr_matx_t) == k_dataset_ord$ensembl) # must be true 
+
+```
+
+## Module eigengenes - Lv3
+
+Showing the module eigengenes in a dataframe, with each column corresponding to one eigengene. 
+```{r eigen}
+colors = k_dataset_ord$cluster_lv3
+lv3_moduleEigengenes = moduleEigengenes(expr_matx_t, colors, verbose = 0)
+
+# save results
+save(lv3_moduleEigengenes, file = paste0(net_dir, "lv3_moduleEigengenes.Rdata"))
+write.table(lv3_moduleEigengenes$eigengenes, file = paste0(net_dir, "lv3_moduleEigengenes.txt"), sep = "\t", quote = F, row.names = T)
+
+createDT(lv3_moduleEigengenes$eigengenes)
+```
+
+## Variance Explained
+
+A dataframe in which each column corresponds to a module, with the component varExplained[PC, module] giving the variance of module explained by the principal component no. PC. The calculation is exact irrespective of the number of computed principal components. At most 10 variance explained values are recorded in this dataframe.
+
+**How much of the 1st PC explains expression of the module?** For example, the Module 01 eigengene explains 15% of the expression of the genes in the module. 
+
+Eigengene of a "Module" with one gene is equal 1. 
+
+```{r var_exp}
+write.table(lv3_moduleEigengenes$varExplained, file = paste0(net_dir, "lv3_variancer_exp.txt"), sep = "\t", quote = F, row.names = T)
+colnames(lv3_moduleEigengenes$varExplained) = gsub("X", "M", colnames(lv3_moduleEigengenes$varExplained))
+createDT(lv3_moduleEigengenes$varExplained)
+```
+
+## Average expression - Lv3
+A dataframe containing average normalized expression in each module. 
+```{r ave}
+# The columns are named by the corresponding color with an "AE" prepended, e.g., AEturquoise etc.
+colnames(lv3_moduleEigengenes$averageExpr) = gsub("AE", "AE_M", colnames(lv3_moduleEigengenes$averageExpr))
+write.table(lv3_moduleEigengenes$averageExpr, file = paste0(net_dir, "lv3_averageExpr.txt"), sep = "\t", quote = F, row.names = T)
+createDT(lv3_moduleEigengenes$averageExpr)
+```
+
+---
+
+## Session info
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,164 @@
+---
+title: "Enrichment Analysis for SpeakEasy clusters"
+subtitle: "Region: MF"
+author:  |
+ | Katia Lopes 
+ | Ricardo Vialle
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+> Fisher test by module
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(dplyr)
+```
+
+```{r Helper Functions, echo=FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+
+# Enrichment
+source("/pastel/Github_scripts/SpeakEasy_net/downstream_speakeasy/speakeasy_downstream_lib.R") # Fisher test 
+```
+
+# Input network
+Level 3 of clusters. We keep only the modules with more than 30 nodes for downstream analysis. 
+```{r net, warning=FALSE}
+# Network clusters 
+net_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_net_MF/"
+fea_dir = "/pastel/Github_scripts/SpeakEasy_dlpfc/bulk_dlpfc/FEA_analysis/fisher_heatmap/"
+modules_file = read.table(paste0(net_dir, "geneBycluster.txt"), header = T)
+
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+too_small = as.character( modules_size$module[modules_size$n_nodes < 30]) # Get modules < 30 nodes to be removed
+net_output = modules_file %>% filter(! cluster_lv3 %in% as.integer(too_small)) # the clusters with at least 30 nodes 
+
+createDT(net_output)
+```
+
+Universe tested: 
+```{r size_uni}
+length(net_output$ensembl)
+```
+
+# Enrichment analysis
+## GO lists
+
+**Pvalue adjusted by Bonferroni**
+```{r gene_lists1, warning=FALSE, message=FALSE, fig.width=16, fig.height=17}
+# Gene lists. These files must contain 2 columns, with header: 1) symbol, 2) ensembl 
+path_to_files = "/pastel/resources/gene_lists/mynd_lists/"
+geneList_file_names = c("antigen_presentation_GO.txt",
+                        "apoptosis_GO.txt",
+                        "autophagy_GO.txt",
+                        "cell_proliferation_GO.txt",
+                        "DNA_metabolic_GO.txt",
+                        "DNA_methylation_GO.txt",
+                        "DNA_repair_GO.txt",
+                        "DNA_replication_GO.txt",
+                        "endosomal_transport_GO.txt",
+                        "exocytosis_GO.txt",
+                        "glucose_metabolism_GO.txt",
+                        "IFNb_response_GO.txt",
+                        "IFNg_response_GO.txt",
+                        "inflammatory_resp_GO.txt",
+                        "lipid_metabolism_GO.txt",
+                        "lysosome_GO.txt",
+                        "macroautophagy_GO.txt",
+                        "mitochondria_GO.txt",
+                        "neutrophil_activation_GO.txt",
+                        "phagocytosis_GO.txt",
+                        "protein_ubiquitinization_GO.txt",
+                        "proteolysis_GO.txt",
+                        "response_cytokine_GO.txt",
+                        "ribosome_GO.txt",
+                        "RNA_splicing_GO.txt",
+                        "translation_GO.txt",
+                        "vesicle_med_transp_GO.txt",
+                        "viral_response_GO.txt")
+
+genes_universe = net_output$ensembl
+
+cluster_lables = net_output$cluster_lv3
+geneAnnotation_lists = parseGeneLists(path_to_files, geneList_file_names, genes_universe)
+gene_cluster_enrich = moduleEnrich(genes_universe, cluster_lables, geneAnnotation_lists)
+
+p = plot_module_enrichment_heatmap(cluster_lables, gene_cluster_enrich, plot_title = "Module enrichment", filter_pval = 1, bonf.adj.pval = F)
+
+# pdf(file = paste0(fea_dir, "h_fisher_MFlevel3_GO_bonf.pdf"), width = 18, height = 17)
+# p
+# dev.off()
+
+p
+```
+
+## Cell type, m109 and GWAS AD
+**Pvalue adjusted by Bonferroni.**
+
+Cell type markers from [Johnson et al, 2022](https://www.nature.com/articles/s41593-021-00999-y) , plus m109 from [Mostafavi et al, 2018](https://www.nature.com/articles/s41593-018-0154-9). GWAS AD from [Bellenguez et al, 2022](https://www.nature.com/articles/s41588-022-01024-z). Plaque-induced gene list - PIG from [Chen et al, 2020](https://www.sciencedirect.com/science/article/pii/S0092867420308151?via%3Dihub).
+```{r gene_lists, warning=FALSE, message=FALSE, fig.width=8, fig.height=15}
+# Gene lists. These files must contain 2 columns, with header: 1) symbol, 2) ensembl 
+path_to_files = "/pastel/resources/gene_lists/celltype_markers/"
+lists_dir = "/pastel/resources/gene_lists/lists4heatmap/"
+geneList_file_names = c("astrocytes.txt",
+                        "microglia.txt",
+                        "neuron.txt",
+                        "oligodendrocytes.txt",
+                        "endothelia.txt",
+                        "m109_mostafavi.txt",
+                        "ROSMAP_up_AD.txt",
+                        "ROSMAP_down_AD.txt",
+                        "GWAS_AD_Bel2022.txt",
+                        "PIG_orthologs.txt")
+
+genes_universe = net_output$ensembl
+
+cluster_lables = net_output$cluster_lv3
+geneAnnotation_lists = parseGeneLists(lists_dir, geneList_file_names, genes_universe)
+gene_cluster_enrich = moduleEnrich(genes_universe, cluster_lables, geneAnnotation_lists)
+
+p = plot_module_enrichment_heatmap(cluster_lables, gene_cluster_enrich, plot_title = "Module enrichment", filter_pval = 1, bonf.adj.pval = F)
+
+# pdf(file = paste0(fea_dir, "h_fisher_MFlevel3_celltype_pig.pdf"), width = 8, height = 15)
+# p
+# dev.off()
+
+# save(gene_cluster_enrich, file = paste0(fea_dir, "Enrichment_res.Rdata"))
+
+p
+```
+
+# Session info
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,752 @@
+---
+title: "Single nuclei RNASeq from DLPFC"
+subtitle: ""
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo A. Vialle
+ | Shinya Tasaki
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+Do the modules recapitulate sub-cell types clusters/states? 
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r Helper Functions, echo=FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+```
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(readxl)
+library(tidyverse)
+if (!require("GeneOverlap", quietly = TRUE)) BiocManager::install("GeneOverlap"); library(GeneOverlap)
+library(RColorBrewer)
+library(gtools)
+library(grid)
+library(purrr)
+
+net_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_singlenuclei/2nd_pass/snakemake-sn/results/"
+work_dir = "/pastel/Github_scripts/SpeakEasy_dlpfc/figures4paper/v3_may2024/"
+```
+
+```{r}
+degs_sn = "/pastel/resources/sn_columbia_degs/Green_sn_may2024/SupplementaryTable2_AtlasCharacterization1.xlsx"
+degs_sn = read_excel(degs_sn, sheet = "DEGs", col_names = TRUE)
+degs_sn = as.data.frame(degs_sn)
+
+# createDT(degs_sn)
+```
+
+# Microglia 
+```{r fig.width=14, fig.height=6}
+#############################################
+### Microglia states vs Microglia modules
+#############################################
+
+microglia_states_df = degs_sn %>% 
+  filter(cell.type == "microglia") %>%
+  group_by(cell.type,state) %>% 
+  reframe(n_genes = n(), gene, avg_log2FC, p_val_adj) %>%
+  mutate(p_val_adj = ifelse(p_val_adj == 0, 1e-310, p_val_adj),
+         category = paste0(cell.type, "_", state)) %>%
+  group_by(category) %>% 
+  mutate(stats = (p_val_adj*avg_log2FC)) %>%
+  filter(!is.na(state))
+
+degs_sn_clean = microglia_states_df
+genes_lists = list()
+for(cat_i in unique(degs_sn_clean$category)){
+  genes_lists[[cat_i]] = unique(degs_sn_clean$gene[degs_sn_clean$category == cat_i])
+}
+genes_lists4GSEA = list()
+for(cat_i in unique(degs_sn_clean$category)){
+  genes_lists4GSEA[[cat_i]] = setNames(degs_sn_clean$stats[degs_sn_clean$category == cat_i], degs_sn_clean$gene[degs_sn_clean$category == cat_i])
+}
+
+### Modules from SE
+modules_file = read.table(paste0(net_dir, "mic/geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+too_small = as.character( modules_size$module[modules_size$n_nodes < 30]) # Get modules < 30 nodes to be removed
+clusters_list = as.character(unique(modules_file$cluster_lv3))
+clusters_list = clusters_list[!clusters_list %in% too_small]
+
+# Build list of outputs
+output <- list()
+for(i in 1:length(clusters_list)){
+  m_cluster = clusters_list[i]
+  module <- subset(modules_file, modules_file$cluster_lv3==m_cluster, select = c("gene_name"))
+  
+  # Header for iteration
+  txt <- paste0("M", m_cluster, " (", length(module$gene_name), ")" )
+  output[[txt]] <- module$gene_name
+}  
+
+# Overlap
+gom.obj <- newGOM(genes_lists, output, genome.size = nrow(modules_file), spec=c('hg19.gene'))
+pval_table = getMatrix(gom.obj, name="pval")
+odds_table = getMatrix(gom.obj, "odds.ratio")
+jaccard_table = getMatrix(gom.obj, "Jaccard")
+mod_intersection = getMatrix(gom.obj, name="intersection")
+
+rownames_plot = paste0(names(genes_lists)," (",sapply(genes_lists, length),")")
+rownames(pval_table) = rownames_plot
+rownames(odds_table) = rownames_plot
+rownames(jaccard_table) = rownames_plot
+rownames(mod_intersection) = rownames_plot
+
+pval_bonf_df = as.data.frame(pval_table) %>% 
+  mutate(across(dplyr::everything(), ~ p.adjust(.x, method = "bonferroni", n = length(.x)))) %>% 
+  as.data.frame() 
+
+pval_table.signif <- symnum(as.matrix(pval_bonf_df), corr = FALSE, na = FALSE, 
+                                       cutpoints = c(0, 0.05, 1), 
+                                       symbols = c(quote("\u2731")," "))
+
+col_fun = colorRampPalette(c("white","#9467BD"))(5)
+
+# grDevices::cairo_pdf(file = paste0(work_dir, "jaccard_mic.pdf"), width = 16, height = 6)
+ComplexHeatmap::Heatmap(jaccard_table, 
+                        col = col_fun, name = "Jaccard Index",
+                        rect_gp = gpar(col = "white", lwd = 0.2), #lwd is the white line grid. 0.2 for 23 modules
+                        column_title = "",
+                        row_title = "Modules", row_names_side = c("left"),
+                        row_order = order(sapply(genes_lists, length)), 
+                        cluster_columns = T, show_column_dend = T,
+                        cluster_rows = T, show_row_dend = T,
+                        cell_fun = function(j, i, x, y, width, height, fill) {
+                          grid.text( pval_table.signif[i,j], x, y, gp = gpar(fontsize = 12))
+                          # grid.text(sprintf("%d\n(%s)", mod_intersection[i, j],formatC(pval_table[i, j], format = "e", digits = 1)), x, y, gp = gpar(fontsize = 9)) #fontsize = 10
+                        }) 
+# dev.off()
+
+```
+
+```{r}
+mod_intersection_list = getNestedList(gom.obj, name="intersection")
+mod_intersection_list2 = lapply(mod_intersection_list, function(x) {
+  x_df = map_df(x, ~{
+  paste(.x, collapse = ",")
+  }, .id = "id") %>% t() %>% as.data.frame()
+  x_df = x_df %>% rownames_to_column("subcell_pop")
+  colnames(x_df) = c("subcell_pop", "genes")
+  x_df
+})
+
+mod_intersection_df = map_df(mod_intersection_list2, bind_rows,.id = "module")
+mod_intersection_df = mod_intersection_df[,c("subcell_pop", "module", "genes")] %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_intersection_num_df = as.data.frame(mod_intersection) %>% rownames_to_column("subcell_pop") %>%
+  pivot_longer(cols = -subcell_pop, 
+               names_to = "module", 
+               values_to = "intersection") %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_pval_bonf_df = pval_bonf_df %>% rownames_to_column("subcell_pop") %>%
+           pivot_longer(cols = -subcell_pop, 
+                        names_to = "module", 
+                        values_to = "bonf_pval") %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_stats = mod_pval_bonf_df %>%
+  left_join(mod_intersection_num_df[,c("cell_mod","intersection")], by = c("cell_mod")) %>%
+  left_join(mod_intersection_df[,c("cell_mod","genes")], by = c("cell_mod")) %>% distinct() %>%
+  arrange(bonf_pval)
+
+createDT(mod_stats)
+```
+
+# Astrocytes
+```{r fig.width=14, fig.height=5}
+#############################################
+### Astrocytes states vs Astrocytes modules
+#############################################
+astrocytes_states_df = degs_sn %>% 
+  filter(cell.type == "astrocytes") %>%
+  group_by(cell.type,state) %>% 
+  reframe(n_genes = n(), gene, avg_log2FC, p_val_adj) %>%
+  mutate(p_val_adj = ifelse(p_val_adj == 0, 1e-310, p_val_adj),
+         category = paste0(cell.type, "_", state)) %>%
+  group_by(category) %>% 
+  mutate(stats = (p_val_adj*avg_log2FC)) %>%
+  filter(!is.na(state))
+
+degs_sn_clean = astrocytes_states_df
+genes_lists = list()
+for(cat_i in unique(degs_sn_clean$category)){
+  genes_lists[[cat_i]] = degs_sn_clean$gene[degs_sn_clean$category == cat_i]
+}
+genes_lists4GSEA = list()
+for(cat_i in unique(degs_sn_clean$category)){
+  genes_lists4GSEA[[cat_i]] = setNames(degs_sn_clean$stats[degs_sn_clean$category == cat_i], degs_sn_clean$gene[degs_sn_clean$category == cat_i])
+}
+
+### Modules from SE
+modules_file = read.table(paste0(net_dir, "ast/geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+too_small = as.character( modules_size$module[modules_size$n_nodes < 30]) # Get modules < 30 nodes to be removed
+clusters_list = as.character(unique(modules_file$cluster_lv3))
+clusters_list = clusters_list[!clusters_list %in% too_small]
+
+# Build list of outputs
+output <- list()
+for(i in 1:length(clusters_list)){
+  m_cluster = clusters_list[i]
+  module <- subset(modules_file, modules_file$cluster_lv3==m_cluster, select = c("gene_name"))
+  
+  # Header for iteration
+  txt <- paste0("M", m_cluster, " (", length(module$gene_name), ")" )
+  output[[txt]] <- module$gene_name
+}  
+
+# Overlap
+gom.obj <- newGOM(genes_lists, output, genome.size = nrow(modules_file), spec=c('hg19.gene'))
+pval_table = getMatrix(gom.obj, name="pval")
+odds_table = getMatrix(gom.obj, "odds.ratio")
+jaccard_table = getMatrix(gom.obj, "Jaccard")
+mod_intersection = getMatrix(gom.obj, name="intersection")
+
+rownames_plot = paste0(names(genes_lists)," (",sapply(genes_lists, length),")")
+rownames(pval_table) = rownames_plot
+rownames(odds_table) = rownames_plot
+rownames(jaccard_table) = rownames_plot
+rownames(mod_intersection) = rownames_plot
+
+pval_bonf_df = as.data.frame(pval_table) %>% 
+  mutate(across(dplyr::everything(), ~ p.adjust(.x, method = "bonferroni", n = length(.x)))) %>% 
+  as.data.frame() 
+
+pval_table.signif <- symnum(as.matrix(pval_bonf_df), corr = FALSE, na = FALSE, 
+                            cutpoints = c(0, 0.05, 1), 
+                            symbols = c(quote("\u2731")," "))
+
+col_fun = colorRampPalette(c("white","#1F77B4"))(5)
+
+# grDevices::cairo_pdf(file = paste0(work_dir, "jaccard_ast.pdf"), width = 13, height = 4)
+ComplexHeatmap::Heatmap(jaccard_table, 
+                        col = col_fun, name = "Jaccard Index",
+                        rect_gp = gpar(col = "white", lwd = 0.2), #lwd is the white line grid. 0.2 for 23 modules
+                        column_title = "",
+                        row_title = "Modules", row_names_side = c("left"),
+                        row_order = order(sapply(genes_lists, length)), 
+                        cluster_columns = T, show_column_dend = T,
+                        cluster_rows = T, show_row_dend = T,
+                        cell_fun = function(j, i, x, y, width, height, fill) {
+                          grid.text( pval_table.signif[i,j], x, y, gp = gpar(fontsize = 12))
+                          # grid.text(sprintf("%d\n(%s)", mod_intersection[i, j],formatC(pval_table[i, j], format = "e", digits = 1)), x, y, gp = gpar(fontsize = 9)) #fontsize = 10
+                        }) 
+# dev.off()
+
+```
+
+```{r}
+mod_intersection_list = getNestedList(gom.obj, name="intersection")
+mod_intersection_list2 = lapply(mod_intersection_list, function(x) {
+  x_df = map_df(x, ~{
+  paste(.x, collapse = ",")
+  }, .id = "id") %>% t() %>% as.data.frame()
+  x_df = x_df %>% rownames_to_column("subcell_pop")
+  colnames(x_df) = c("subcell_pop", "genes")
+  x_df
+})
+
+mod_intersection_df = map_df(mod_intersection_list2, bind_rows,.id = "module")
+mod_intersection_df = mod_intersection_df[,c("subcell_pop", "module", "genes")] %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_intersection_num_df = as.data.frame(mod_intersection) %>% rownames_to_column("subcell_pop") %>%
+  pivot_longer(cols = -subcell_pop, 
+               names_to = "module", 
+               values_to = "intersection") %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_pval_bonf_df = pval_bonf_df %>% rownames_to_column("subcell_pop") %>%
+           pivot_longer(cols = -subcell_pop, 
+                        names_to = "module", 
+                        values_to = "bonf_pval") %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_stats = mod_pval_bonf_df %>%
+  left_join(mod_intersection_num_df[,c("cell_mod","intersection")], by = c("cell_mod")) %>%
+  left_join(mod_intersection_df[,c("cell_mod","genes")], by = c("cell_mod")) %>% distinct() %>%
+  arrange(bonf_pval)
+
+createDT(mod_stats)
+```
+
+# Excitatory neurons
+```{r fig.width=14, fig.height=6}
+#############################################
+### excitatory states vs excitatory modules
+#############################################
+
+excitatory_states_df = degs_sn %>% 
+  filter(cell.type == "excitatory") %>%
+  group_by(cell.type,state) %>% 
+  reframe(n_genes = n(), gene, avg_log2FC, p_val_adj) %>%
+  mutate(p_val_adj = ifelse(p_val_adj == 0, 1e-310, p_val_adj),
+         category = paste0(cell.type, "_", state)) %>%
+  group_by(category) %>% 
+  mutate(stats = (p_val_adj*avg_log2FC)) %>%
+  filter(!is.na(state))
+
+degs_sn_clean = excitatory_states_df
+genes_lists = list()
+for(cat_i in unique(degs_sn_clean$category)){
+  genes_lists[[cat_i]] = degs_sn_clean$gene[degs_sn_clean$category == cat_i]
+}
+genes_lists4GSEA = list()
+for(cat_i in unique(degs_sn_clean$category)){
+  genes_lists4GSEA[[cat_i]] = setNames(degs_sn_clean$stats[degs_sn_clean$category == cat_i], degs_sn_clean$gene[degs_sn_clean$category == cat_i])
+}
+
+### Modules from SE
+modules_file = read.table(paste0(net_dir, "ext/geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+too_small = as.character( modules_size$module[modules_size$n_nodes < 30]) # Get modules < 30 nodes to be removed
+clusters_list = as.character(unique(modules_file$cluster_lv3))
+clusters_list = clusters_list[!clusters_list %in% too_small]
+
+# Build list of outputs
+output <- list()
+for(i in 1:length(clusters_list)){
+  m_cluster = clusters_list[i]
+  module <- subset(modules_file, modules_file$cluster_lv3==m_cluster, select = c("gene_name"))
+  
+  # Header for iteration
+  txt <- paste0("M", m_cluster, " (", length(module$gene_name), ")" )
+  output[[txt]] <- module$gene_name
+}  
+
+# Overlap
+gom.obj <- newGOM(genes_lists, output, genome.size = nrow(modules_file), spec=c('hg19.gene'))
+pval_table = getMatrix(gom.obj, name="pval")
+odds_table = getMatrix(gom.obj, "odds.ratio")
+jaccard_table = getMatrix(gom.obj, "Jaccard")
+mod_intersection = getMatrix(gom.obj, name="intersection")
+
+rownames_plot = paste0(names(genes_lists)," (",sapply(genes_lists, length),")")
+rownames(pval_table) = rownames_plot
+rownames(odds_table) = rownames_plot
+rownames(jaccard_table) = rownames_plot
+rownames(mod_intersection) = rownames_plot
+
+pval_bonf_df = as.data.frame(pval_table) %>% 
+  mutate(across(dplyr::everything(), ~ p.adjust(.x, method = "bonferroni", n = length(.x)))) %>% 
+  as.data.frame() 
+
+pval_table.signif <- symnum(as.matrix(pval_bonf_df), corr = FALSE, na = FALSE, 
+                            cutpoints = c(0, 0.05, 1), 
+                            symbols = c(quote("\u2731")," "))
+
+col_fun = colorRampPalette(c("white","#2ca02c"))(5)
+
+ComplexHeatmap::Heatmap(jaccard_table, 
+                        col = col_fun, name = "Jaccard Index",
+                        rect_gp = gpar(col = "white", lwd = 0.2), #lwd is the white line grid. 0.2 for 23 modules
+                        column_title = "",
+                        row_title = "Modules", row_names_side = c("left"),
+                        row_order = order(sapply(genes_lists, length)), 
+                        cluster_columns = T, show_column_dend = T,
+                        cluster_rows = T, show_row_dend = T,
+                        cell_fun = function(j, i, x, y, width, height, fill) {
+                          grid.text( pval_table.signif[i,j], x, y, gp = gpar(fontsize = 12))
+                          # grid.text(sprintf("%d\n(%s)", mod_intersection[i, j],formatC(pval_table[i, j], format = "e", digits = 1)), x, y, gp = gpar(fontsize = 9)) #fontsize = 10
+                        }) 
+```
+
+```{r}
+mod_intersection_list = getNestedList(gom.obj, name="intersection")
+mod_intersection_list2 = lapply(mod_intersection_list, function(x) {
+  x_df = map_df(x, ~{
+  paste(.x, collapse = ",")
+  }, .id = "id") %>% t() %>% as.data.frame()
+  x_df = x_df %>% rownames_to_column("subcell_pop")
+  colnames(x_df) = c("subcell_pop", "genes")
+  x_df
+})
+
+mod_intersection_df = map_df(mod_intersection_list2, bind_rows,.id = "module")
+mod_intersection_df = mod_intersection_df[,c("subcell_pop", "module", "genes")] %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_intersection_num_df = as.data.frame(mod_intersection) %>% rownames_to_column("subcell_pop") %>%
+  pivot_longer(cols = -subcell_pop, 
+               names_to = "module", 
+               values_to = "intersection") %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_pval_bonf_df = pval_bonf_df %>% rownames_to_column("subcell_pop") %>%
+           pivot_longer(cols = -subcell_pop, 
+                        names_to = "module", 
+                        values_to = "bonf_pval") %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_stats = mod_pval_bonf_df %>%
+  left_join(mod_intersection_num_df[,c("cell_mod","intersection")], by = c("cell_mod")) %>%
+  left_join(mod_intersection_df[,c("cell_mod","genes")], by = c("cell_mod")) %>% distinct() %>%
+  arrange(bonf_pval)
+
+createDT(mod_stats)
+```
+
+# Inhibitory neurons
+```{r fig.width=14, fig.height=6}
+#############################################
+### inhibitory states vs inhibitory modules
+#############################################
+
+inhibitory_states_df = degs_sn %>% 
+  filter(cell.type == "inhibitory") %>%
+  group_by(cell.type,state) %>% 
+  reframe(n_genes = n(), gene, avg_log2FC, p_val_adj) %>%
+  mutate(p_val_adj = ifelse(p_val_adj == 0, 1e-310, p_val_adj),
+         category = paste0(cell.type, "_", state)) %>%
+  group_by(category) %>% 
+  mutate(stats = (p_val_adj*avg_log2FC)) %>%
+  filter(!is.na(state))
+
+degs_sn_clean = inhibitory_states_df
+genes_lists = list()
+for(cat_i in unique(degs_sn_clean$category)){
+  genes_lists[[cat_i]] = degs_sn_clean$gene[degs_sn_clean$category == cat_i]
+}
+genes_lists4GSEA = list()
+for(cat_i in unique(degs_sn_clean$category)){
+  genes_lists4GSEA[[cat_i]] = setNames(degs_sn_clean$stats[degs_sn_clean$category == cat_i], degs_sn_clean$gene[degs_sn_clean$category == cat_i])
+}
+
+### Modules from SE
+modules_file = read.table(paste0(net_dir, "inh/geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+too_small = as.character( modules_size$module[modules_size$n_nodes < 30]) # Get modules < 30 nodes to be removed
+clusters_list = as.character(unique(modules_file$cluster_lv3))
+clusters_list = clusters_list[!clusters_list %in% too_small]
+
+# Build list of outputs
+output <- list()
+for(i in 1:length(clusters_list)){
+  m_cluster = clusters_list[i]
+  module <- subset(modules_file, modules_file$cluster_lv3==m_cluster, select = c("gene_name"))
+  
+  # Header for iteration
+  txt <- paste0("M", m_cluster, " (", length(module$gene_name), ")" )
+  output[[txt]] <- module$gene_name
+}  
+
+# Overlap
+gom.obj <- newGOM(genes_lists, output, genome.size = nrow(modules_file), spec=c('hg19.gene'))
+pval_table = getMatrix(gom.obj, name="pval")
+odds_table = getMatrix(gom.obj, "odds.ratio")
+jaccard_table = getMatrix(gom.obj, "Jaccard")
+mod_intersection = getMatrix(gom.obj, name="intersection")
+
+rownames_plot = paste0(names(genes_lists)," (",sapply(genes_lists, length),")")
+rownames(pval_table) = rownames_plot
+rownames(odds_table) = rownames_plot
+rownames(jaccard_table) = rownames_plot
+rownames(mod_intersection) = rownames_plot
+
+pval_bonf_df = as.data.frame(pval_table) %>% 
+  mutate(across(dplyr::everything(), ~ p.adjust(.x, method = "bonferroni", n = length(.x)))) %>% 
+  as.data.frame() 
+
+pval_table.signif <- symnum(as.matrix(pval_bonf_df), corr = FALSE, na = FALSE, 
+                            cutpoints = c(0, 0.05, 1), 
+                            symbols = c(quote("\u2731")," "))
+
+col_fun = colorRampPalette(c("white","#d62728"))(5)
+
+ComplexHeatmap::Heatmap(jaccard_table, 
+                        col = col_fun, name = "Jaccard Index",
+                        rect_gp = gpar(col = "white", lwd = 0.2), #lwd is the white line grid. 0.2 for 23 modules
+                        column_title = "",
+                        row_title = "Modules", row_names_side = c("left"),
+                        row_order = order(sapply(genes_lists, length)), 
+                        cluster_columns = T, show_column_dend = T,
+                        cluster_rows = T, show_row_dend = T,
+                        cell_fun = function(j, i, x, y, width, height, fill) {
+                          grid.text( pval_table.signif[i,j], x, y, gp = gpar(fontsize = 12))
+                          # grid.text(sprintf("%d\n(%s)", mod_intersection[i, j],formatC(pval_table[i, j], format = "e", digits = 1)), x, y, gp = gpar(fontsize = 9)) #fontsize = 10
+                        }) 
+```
+
+```{r}
+mod_intersection_list = getNestedList(gom.obj, name="intersection")
+mod_intersection_list2 = lapply(mod_intersection_list, function(x) {
+  x_df = map_df(x, ~{
+  paste(.x, collapse = ",")
+  }, .id = "id") %>% t() %>% as.data.frame()
+  x_df = x_df %>% rownames_to_column("subcell_pop")
+  colnames(x_df) = c("subcell_pop", "genes")
+  x_df
+})
+
+mod_intersection_df = map_df(mod_intersection_list2, bind_rows,.id = "module")
+mod_intersection_df = mod_intersection_df[,c("subcell_pop", "module", "genes")] %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_intersection_num_df = as.data.frame(mod_intersection) %>% rownames_to_column("subcell_pop") %>%
+  pivot_longer(cols = -subcell_pop, 
+               names_to = "module", 
+               values_to = "intersection") %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_pval_bonf_df = pval_bonf_df %>% rownames_to_column("subcell_pop") %>%
+           pivot_longer(cols = -subcell_pop, 
+                        names_to = "module", 
+                        values_to = "bonf_pval") %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_stats = mod_pval_bonf_df %>%
+  left_join(mod_intersection_num_df[,c("cell_mod","intersection")], by = c("cell_mod")) %>%
+  left_join(mod_intersection_df[,c("cell_mod","genes")], by = c("cell_mod")) %>% distinct() %>%
+  arrange(bonf_pval)
+
+createDT(mod_stats)
+```
+
+# Oligodendrocytes
+```{r fig.width=14, fig.height=6}
+#############################################
+### oligodendroglia states vs oligodendroglia modules
+#############################################
+
+oligodendroglia_states_df = degs_sn %>% 
+  filter(cell.type == "oligodendroglia") %>%
+  group_by(cell.type,state) %>% 
+  reframe(n_genes = n(), gene, avg_log2FC, p_val_adj) %>%
+  mutate(p_val_adj = ifelse(p_val_adj == 0, 1e-310, p_val_adj),
+         category = paste0(cell.type, "_", state)) %>%
+  group_by(category) %>% 
+  mutate(stats = (p_val_adj*avg_log2FC)) %>%
+  filter(!is.na(state))
+
+degs_sn_clean = oligodendroglia_states_df
+genes_lists = list()
+for(cat_i in unique(degs_sn_clean$category)){
+  genes_lists[[cat_i]] = degs_sn_clean$gene[degs_sn_clean$category == cat_i]
+}
+genes_lists4GSEA = list()
+for(cat_i in unique(degs_sn_clean$category)){
+  genes_lists4GSEA[[cat_i]] = setNames(degs_sn_clean$stats[degs_sn_clean$category == cat_i], degs_sn_clean$gene[degs_sn_clean$category == cat_i])
+}
+
+### Modules from SE
+modules_file = read.table(paste0(net_dir, "oli/geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+too_small = as.character( modules_size$module[modules_size$n_nodes < 30]) # Get modules < 30 nodes to be removed
+clusters_list = as.character(unique(modules_file$cluster_lv3))
+clusters_list = clusters_list[!clusters_list %in% too_small]
+
+# Build list of outputs
+output <- list()
+for(i in 1:length(clusters_list)){
+  m_cluster = clusters_list[i]
+  module <- subset(modules_file, modules_file$cluster_lv3==m_cluster, select = c("gene_name"))
+  
+  # Header for iteration
+  txt <- paste0("M", m_cluster, " (", length(module$gene_name), ")" )
+  output[[txt]] <- module$gene_name
+}  
+
+# Overlap
+gom.obj <- newGOM(genes_lists, output, genome.size = nrow(modules_file), spec=c('hg19.gene'))
+pval_table = getMatrix(gom.obj, name="pval")
+odds_table = getMatrix(gom.obj, "odds.ratio")
+jaccard_table = getMatrix(gom.obj, "Jaccard")
+mod_intersection = getMatrix(gom.obj, name="intersection")
+
+rownames_plot = paste0(names(genes_lists)," (",sapply(genes_lists, length),")")
+rownames(pval_table) = rownames_plot
+rownames(odds_table) = rownames_plot
+rownames(jaccard_table) = rownames_plot
+rownames(mod_intersection) = rownames_plot
+
+pval_bonf_df = as.data.frame(pval_table) %>% 
+  mutate(across(dplyr::everything(), ~ p.adjust(.x, method = "bonferroni", n = length(.x)))) %>% 
+  as.data.frame() 
+
+pval_table.signif <- symnum(as.matrix(pval_bonf_df), corr = FALSE, na = FALSE, 
+                            cutpoints = c(0, 0.05, 1), 
+                            symbols = c(quote("\u2731")," "))
+
+col_fun = colorRampPalette(c("white","#e377c2"))(5)
+
+ComplexHeatmap::Heatmap(jaccard_table, 
+                        col = col_fun, name = "Jaccard Index",
+                        rect_gp = gpar(col = "white", lwd = 0.2), #lwd is the white line grid. 0.2 for 23 modules
+                        column_title = "",
+                        row_title = "Modules", row_names_side = c("left"),
+                        row_order = order(sapply(genes_lists, length)), 
+                        cluster_columns = T, show_column_dend = T,
+                        cluster_rows = T, show_row_dend = T,
+                        cell_fun = function(j, i, x, y, width, height, fill) {
+                          grid.text( pval_table.signif[i,j], x, y, gp = gpar(fontsize = 12))
+                          # grid.text(sprintf("%d\n(%s)", mod_intersection[i, j],formatC(pval_table[i, j], format = "e", digits = 1)), x, y, gp = gpar(fontsize = 9)) #fontsize = 10
+                        }) 
+
+
+
+```
+
+```{r}
+mod_intersection_list = getNestedList(gom.obj, name="intersection")
+mod_intersection_list2 = lapply(mod_intersection_list, function(x) {
+  x_df = map_df(x, ~{
+  paste(.x, collapse = ",")
+  }, .id = "id") %>% t() %>% as.data.frame()
+  x_df = x_df %>% rownames_to_column("subcell_pop")
+  colnames(x_df) = c("subcell_pop", "genes")
+  x_df
+})
+
+mod_intersection_df = map_df(mod_intersection_list2, bind_rows,.id = "module")
+mod_intersection_df = mod_intersection_df[,c("subcell_pop", "module", "genes")] %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_intersection_num_df = as.data.frame(mod_intersection) %>% rownames_to_column("subcell_pop") %>%
+  pivot_longer(cols = -subcell_pop, 
+               names_to = "module", 
+               values_to = "intersection") %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_pval_bonf_df = pval_bonf_df %>% rownames_to_column("subcell_pop") %>%
+           pivot_longer(cols = -subcell_pop, 
+                        names_to = "module", 
+                        values_to = "bonf_pval") %>%
+  mutate(cell_mod = paste0(gsub("(.*) (.*)","\\1",subcell_pop), "_", gsub("(.*) (.*)","\\1",module)))
+
+mod_stats = mod_pval_bonf_df %>%
+  left_join(mod_intersection_num_df[,c("cell_mod","intersection")], by = c("cell_mod")) %>%
+  left_join(mod_intersection_df[,c("cell_mod","genes")], by = c("cell_mod")) %>% distinct() %>%
+  arrange(bonf_pval)
+
+createDT(mod_stats)
+```
+
+```{r eval=FALSE}
+#############################################
+### vascular states vs end modules
+#############################################
+
+vascular_states_df = degs_sn %>% 
+  filter(cell.type == "vascular niche") %>%
+  group_by(cell.type,state) %>% 
+  reframe(n_genes = n(), gene, avg_log2FC, p_val_adj) %>%
+  mutate(p_val_adj = ifelse(p_val_adj == 0, 1e-310, p_val_adj),
+         category = paste0(cell.type, "_", state)) %>%
+  group_by(category) %>% 
+  mutate(stats = (p_val_adj*avg_log2FC)) %>%
+  filter(!is.na(state))
+
+degs_sn_clean = vascular_states_df
+genes_lists = list()
+for(cat_i in unique(degs_sn_clean$category)){
+  genes_lists[[cat_i]] = degs_sn_clean$gene[degs_sn_clean$category == cat_i]
+}
+genes_lists4GSEA = list()
+for(cat_i in unique(degs_sn_clean$category)){
+  genes_lists4GSEA[[cat_i]] = setNames(degs_sn_clean$stats[degs_sn_clean$category == cat_i], degs_sn_clean$gene[degs_sn_clean$category == cat_i])
+}
+
+### Modules from SE
+modules_file = read.table(paste0(net_dir, "end/geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+too_small = as.character( modules_size$module[modules_size$n_nodes < 30]) # Get modules < 30 nodes to be removed
+clusters_list = as.character(unique(modules_file$cluster_lv3))
+clusters_list = clusters_list[!clusters_list %in% too_small]
+
+# Build list of outputs
+output <- list()
+for(i in 1:length(clusters_list)){
+  m_cluster = clusters_list[i]
+  module <- subset(modules_file, modules_file$cluster_lv3==m_cluster, select = c("gene_name"))
+  
+  # Header for iteration
+  txt <- paste0("M", m_cluster, " (", length(module$gene_name), ")" )
+  output[[txt]] <- module$gene_name
+}  
+
+# Overlap
+gom.obj <- newGOM(genes_lists, output, genome.size = nrow(modules_file), spec=c('hg19.gene'))
+pval_table = getMatrix(gom.obj, name="pval")
+odds_table = getMatrix(gom.obj, "odds.ratio")
+jaccard_table = getMatrix(gom.obj, "Jaccard")
+mod_intersection = getMatrix(gom.obj, name="intersection")
+
+rownames_plot = paste0(names(genes_lists)," (",sapply(genes_lists, length),")")
+rownames(pval_table) = rownames_plot
+rownames(odds_table) = rownames_plot
+rownames(jaccard_table) = rownames_plot
+rownames(mod_intersection) = rownames_plot
+
+pval_bonf_df = as.data.frame(pval_table) %>% 
+  mutate(across(dplyr::everything(), ~ p.adjust(.x, method = "bonferroni", n = length(.x)))) %>% 
+  as.data.frame() 
+
+pval_table.signif <- symnum(as.matrix(pval_bonf_df), corr = FALSE, na = FALSE, 
+                            cutpoints = c(0, 0.05, 1), 
+                            symbols = c(quote("\u2731")," "))
+
+col_fun = colorRampPalette(c("white","#ff7f0e"))(5)
+
+ComplexHeatmap::Heatmap(jaccard_table, 
+                        col = col_fun, name = "Jaccard Index",
+                        rect_gp = gpar(col = "white", lwd = 0.2), #lwd is the white line grid. 0.2 for 23 modules
+                        column_title = "",
+                        row_title = "Modules", row_names_side = c("left"),
+                        row_order = order(sapply(genes_lists, length)), 
+                        cluster_columns = T, show_column_dend = T,
+                        cluster_rows = T, show_row_dend = T,
+                        cell_fun = function(j, i, x, y, width, height, fill) {
+                          grid.text( pval_table.signif[i,j], x, y, gp = gpar(fontsize = 12))
+                          # grid.text(sprintf("%d\n(%s)", mod_intersection[i, j],formatC(pval_table[i, j], format = "e", digits = 1)), x, y, gp = gpar(fontsize = 9)) #fontsize = 10
+                        }) 
+
+```
+
+# Session Info
+```{r}
+sessionInfo()
+```
+

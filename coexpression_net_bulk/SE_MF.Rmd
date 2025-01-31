@@ -1,0 +1,183 @@
+---
+title: "SpeakEasy clusters"
+subtitle: "Region: MF"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo A. Vialle
+ | Shinya Tasaki
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+> SpeakEasy code from [Gaiteri et al, 2015.](https://www.nature.com/articles/srep16361)
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(ggfortify)
+library(limma)
+library(tidyverse)
+library(R.matlab)
+library(kableExtra)
+library(readxl) 
+library(ggeasy)
+
+knitr::opts_chunk$set( 
+  warning=FALSE,
+  message=FALSE,
+  results = 'asis',
+  error = FALSE,
+  tidy = FALSE,
+  fig.show = "hold")
+```
+
+```{r Helper Functions, echo=FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+```
+
+```{r folders, echo=TRUE}
+net_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_net_MF/"
+expression_dir = "/pastel/projects/speakeasy_dlpfc/"
+
+```
+
+## Data input
+```{r input.data, echo=TRUE}
+load(paste0(expression_dir, "exprdata_byregion.Rdata")) 
+```
+
+```{r pca, echo=TRUE, fig.width=6, fig.height=4}
+exprData4net = as.data.frame(exprData_MF) 
+res.pca = prcomp(t(exprData4net)) 
+
+autoplot(res.pca, data = as.data.frame(metadata_MF), colour = 'Batch') +
+  scale_colour_viridis_d() +
+  theme_classic() +
+  easy_remove_legend() # Legend removed due to the high number of labels. 
+```
+
+## Parameters for the network
+```{r param_net}
+print(Sys.setenv(MATLAB_R_HOME = "/usr/local/MATLAB/MATLAB_Runtime/v901")) ## Check Matlab path 
+
+data=t(exprData_MF) # transpose to get by gene not by samples
+writeMat(paste0(net_dir, "data.mat"), data=data)
+
+data_loc = paste0(net_dir, "data.mat")
+n_subclust = 3 # number of times the algorithm will run to check for subclusters. Default: 3 
+min_clust = 30 # min number of genes by cluster
+n_replicate = 100 # Default: 100
+n_step = 50 # optimization steps
+out_loc = net_dir
+cor_type = "Pearson"
+frac_sparse = 1 # top 20% (0.2) of the associations (gene expression, 100% is good. 
+# For SNP or DNA methylation you need to set up a smaller threshold of frac_sparse.)
+
+```
+
+## SpeakEasy function
+Heavy chunck! 
+```{r echo=TRUE, eval=FALSE}
+speakeasy <- function(data_loc,n_subclust,min_clust,n_replicate,n_step,frac_sparse,cor_type,out_loc){
+  cmd = paste0("/pastel/projects/speakeasy_dlpfc/SpeakEasy_net_MF/run_SpeakEasy/for_testing/run_run_SpeakEasy.sh $MATLAB_R_HOME ",data_loc," ",
+               n_subclust," ",min_clust," ",
+               n_replicate," ",n_step," ",
+               frac_sparse," ",cor_type," ",
+               out_loc)
+  system(cmd)
+}
+
+speakeasy(data_loc, n_subclust, min_clust, n_replicate, n_step, frac_sparse, cor_type, out_loc) # The output is a file
+```
+
+## Clusters with gene_names
+```{r k_names}
+cluster_codes = readMat(paste0(net_dir, "cluster_codes.mat")) # 3 tables because of the n_subclust parameter. 
+
+cluster_codes_df = as.data.frame(cluster_codes$cluster.codes)
+cluster_codes_df = cluster_codes_df[,c(1,2,4,6)]
+colnames(cluster_codes_df) = c("ensembl","cluster_lv1","cluster_lv2", "cluster_lv3")
+cluster_codes_df$ensembl = colnames(data)
+
+# Get the gene_symbol 
+gene_names1 = as.data.frame(gene_names)
+cluster_codes_df_names = merge(cluster_codes_df, gene_names1, by.x = "ensembl", by.y = "ensgene")
+cluster_codes_df_names$probeid = NULL
+write.table(cluster_codes_df_names, file = paste0(net_dir, "geneBycluster.txt"), sep = "\t", quote = F, row.names = F)
+
+createDT(cluster_codes_df_names)
+```
+
+## Number of genes by cluster
+### Clusters level 1
+```{r lv1, message=TRUE}
+count1 = as.data.frame(table(cluster_codes_df$cluster_lv1))
+colnames(count1) = c("cluster", "n_nodes")
+total_nodes = sum(count1$n_nodes)
+nodes_in_cluster = sum(count1$n_nodes[count1$n_nodes > min_clust])
+message(paste0("Number of clusters with at least 30 nodes: "), length(count1$cluster[count1$n_nodes > min_clust])) # 30 in this case    
+message(paste0("Number of genes assigned in clusters with at least 30 nodes: "), nodes_in_cluster, ". Percentage: ", (nodes_in_cluster/total_nodes)*100, "% of the genes are assigned to a cluster.")
+
+createDT(count1) 
+```
+
+### Clusters level 2
+```{r lv2, message=TRUE}
+count2 = as.data.frame(table(cluster_codes_df$cluster_lv2))
+colnames(count2) = c("cluster", "n_nodes")
+total_nodes = sum(count2$n_nodes)
+nodes_in_cluster = sum(count2$n_nodes[count2$n_nodes > min_clust])
+message(paste0("Number of clusters with at least 30 nodes: "), length(count2$cluster[count2$n_nodes > min_clust])) # 30 in this case    
+message(paste0("Number of genes assigned in clusters with at least 30 nodes: "), nodes_in_cluster, ". Percentage: ", (nodes_in_cluster/total_nodes)*100, "% of the genes are assigned to a cluster.")
+
+createDT(count2) 
+```
+
+### Clusters level 3
+```{r lv3, message=TRUE}
+count3 = as.data.frame(table(cluster_codes_df$cluster_lv3))
+colnames(count3) = c("cluster", "n_nodes")
+total_nodes = sum(count3$n_nodes)
+nodes_in_cluster = sum(count3$n_nodes[count3$n_nodes > min_clust])
+message(paste0("Number of clusters with at least 30 nodes: "), length(count3$cluster[count3$n_nodes > min_clust])) # 30 in this case    
+message(paste0("Number of genes assigned in clusters with at least 30 nodes: "), nodes_in_cluster, ". Percentage: ", (nodes_in_cluster/total_nodes)*100, "% of the genes are assigned to a cluster.")
+
+createDT(count3) 
+```
+
+## Session info
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+

@@ -1,0 +1,379 @@
+---
+title: "Single nuclei RNASeq from DLPFC"
+subtitle: "Phenotype data"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo A. Vialle
+ | Shinya Tasaki
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(ggeasy)
+library(ggpubr)
+library(kableExtra)
+library(gridExtra)
+```
+
+```{r Helper Functions, echo=FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+```
+
+```{r}
+require(tidyverse)
+
+# cleanProjidsInDataTable
+#
+# = input =
+# datatable: two-dimensional table, such as imported by tidyverse::read_csv
+# projid_columns: vector of column names, each of which should appear exactly once in datatable
+#
+# = output =
+# a copy of the datatable where the projid_columns have each been cleaned
+# into a vector of character strings exactly eight digits
+cleanProjidsInDataTable = function(datatable, projid_columns) {
+  copytable = data.table::copy(datatable)
+  for (column in projid_columns) {
+    selection = select(datatable, all_of(column))
+    if (length(selection) == 1) {
+      copytable[[column]] = cleanProjidsInVector(selection[[column]])
+    } else {
+      stop(paste("Unique '", column, "' column not found in datatable.", sep="", collapse=NULL))
+    }  
+  }
+  return(copytable)
+}
+
+cleanProjidsInVector = function(values) {
+  if (is.integer(values)) {
+    return(sapply(values, cleanIntegerProjid))
+  } else if (is.double(values)) {
+    return(sapply(values, cleanDoubleProjid))
+  } else if (is.character(values)) {
+    return(sapply(values, cleanStringProjid))
+  } else {
+    stop("Invalid vector type for cleaning projids.")
+  }
+}
+
+cleanIntegerProjid = function(value) {
+  if (is.integer(value)) {
+    if (is.na(value)) {
+      return(NA)
+    } else if (value >= 0 && value <= 99999999) {
+      string = as.character(value)
+      zeroes = createLeadingZeroes(as.integer(8)-nchar(string))
+      return(paste(zeroes, string, sep="", collapse=""))
+    } else {
+      stopCleaningProjid(value)
+    }  
+  } else {
+    stop("Attempted to clean non-integer value as integer projid.")
+  }
+}
+
+createLeadingZeroes = function(count) {
+  if (is.integer(count) && count >= 0) {
+    return(paste(rep("0", count), collapse=""))
+  } else {
+    stop(paste("Invalid count of leading zeroes: ", count, sep="", collapse=NULL))
+  }
+}
+
+cleanDoubleProjid = function(value) {
+  if (is.double(value)) {
+    if (is.na(value)) {
+      return(NA)
+    } else if (value == as.integer(value)) {
+      return(cleanIntegerProjid(as.integer(value)))
+    } else {
+      stopCleaningProjid(value)
+    }  
+  } else {
+    stop("Attempted to clean non-double value as double projid.")
+  }
+}
+
+cleanStringProjid = function(value) {
+  if (is.character(value)) {
+    if (is.na(value)) {
+      return(NA)
+    } else if (str_detect(value, "^\\d{1,8}$")) {
+      return(cleanIntegerProjid(as.integer(value)))
+    } else {
+      stopCleaningProjid(value)
+    }
+  } else {
+    stop("Attempted to clean non-character value as character projid.")
+  }
+}
+
+stopCleaningProjid = function(projid) {
+  stop(paste("Invalid projid value for cleaning: ", value, sep="", collapse=NULL))
+}
+```
+
+```{r input}
+resource_dir = "/pastel/resources/20220203_snRNAseq_AMPAD/"
+annotation = readRDS(paste0(resource_dir,"updated_annotations/annotations.rds")) # 1638882 rows
+annotation = cleanProjidsInDataTable(annotation,"projid")
+
+load(paste0(resource_dir, "updated_annotations/celltype_exp.RData"))
+annotation.filt = annotation[annotation$projid %in% pheno.filt$projid,]
+# pheno.filt
+```
+
+# Number of donors: 
+```{r n_d}
+length(unique(pheno.filt$projid))
+length(unique(annotation.filt$projid))
+```
+
+# Final diagnosis 
+Final consensus cognitive diagnosis: **cogdx**. Clinical consensus diagnosis of cognitive status at time of death. 
+```{r cogdx}
+counts_cogdx = as.data.frame(table(pheno.filt$cogdx))
+colnames(counts_cogdx) = c("cogdx", "frequency")
+counts_cogdx$cogdx_description = c("1 NCI: No cognitive impairment",
+                                   "2 MCI: Mild cognitive impairment (One impaired domain) and NO other cause of CI",
+                                   "3 MCI: Mild cognitive impairment (One impaired domain) AND another cause of CI",
+                                   "4 AD: Alzheimer’s dementia and NO other cause of CI",
+                                   "5 AD: Alzheimer’s dementia AND another cause of CI",
+                                   "6 Other dementia: Other primary cause of dementia")
+
+createDT(counts_cogdx)
+```
+
+# Cell types: 
+## Class 
+```{r counts_cells}
+createDT(as.tibble(unique(annotation.filt[, c("cell.type", "class")])))
+```
+
+## Cells by donor  
+What is the total number of cells by donor? 
+```{r cell_counts_d, message=FALSE, warning=FALSE}
+length(unique(annotation.filt$projid))
+cell_perc <- annotation.filt %>% group_by(projid, cell.type) %>% summarise(n_cells = n()) %>% ungroup() %>% group_by(projid) %>% mutate(perc_cells = 100*(n_cells/sum(n_cells)))
+
+cell_perc_wide <- cell_perc %>% select(projid,cell.type,perc_cells) %>% pivot_wider(values_from = perc_cells, names_from = cell.type) # cell proportions by donor 
+#write.table(cell_perc_wide, file = paste0(resource_dir, "updated_annotations/cellprop_snRNAseq.txt"), quote = F, row.names = F, sep = "\t")
+
+subcell_perc <- annotation.filt %>% group_by(projid, state) %>% summarise(n_cells = n()) %>% ungroup() %>% group_by(projid) %>% mutate(perc_cells = 100*(n_cells/sum(n_cells)))
+subcell_perc_wide <- subcell_perc %>% select(projid,state,perc_cells) %>% pivot_wider(values_from = perc_cells, names_from = state) # subcell proportions by donor 
+#write.table(subcell_perc_wide, file = paste0(resource_dir, "updated_annotations/subcellprop_snRNAseq.txt"), quote = F, row.names = F, sep = "\t")
+
+cellsBydonor = annotation.filt %>% group_by(projid) %>% summarise(n_cells = n()) %>% arrange(n_cells)
+createDT(cellsBydonor)
+```
+
+```{r cell_counts_plot, fig.width=10, fig.height=3.5, dpi=300, message=FALSE}
+cell_perc$projid = as.character(cell_perc$projid)
+cell_perc_diag = cell_perc %>% left_join(pheno.filt[, c("projid", "cogdx")] )
+cell_perc_diag$cogdx_group = as.character(cell_perc_diag$cogdx)
+cell_perc_diag$cogdx_group[cell_perc_diag$cogdx_group %in% c("1")] <- "NCI" # Normal cognition
+cell_perc_diag$cogdx_group[cell_perc_diag$cogdx_group %in% c("2", "3")] <- "MCI"
+cell_perc_diag$cogdx_group[cell_perc_diag$cogdx_group %in% c("4", "5", "6")] <- "AD"
+
+cell_color_map = list(`Excitatory Neurons` = ggsci::pal_d3("category10")(10)[1],
+                      `Inhibitory Neurons` = ggsci::pal_d3("category10")(10)[2],
+                      Oligodendrocytes = ggsci::pal_d3("category10")(10)[3],
+                      Astrocyte = ggsci::pal_d3("category10")(10)[4],
+                      Microglia = ggsci::pal_d3("category10")(10)[5],
+                      OPCs = ggsci::pal_d3("category10")(10)[6],
+                      Endothelial = ggsci::pal_d3("category10")(10)[9],
+                      Other = "gray")
+
+cell_labels = list(ext = "Excitatory Neurons",
+                   inh = "Inhibitory Neurons",
+                   oli = "Oligodendrocytes",
+                   ast = "Astrocyte",
+                   mic = "Microglia",
+                   opc = "OPCs",
+                   end = "Endothelial",
+                   other = "Other")
+
+cell_perc_diag$cell.type_group = cell_perc_diag$cell.type
+cell_perc_diag$cell.type_group[! cell_perc_diag$cell.type_group %in% as.character(names(cell_color_map))] <- "Other"
+
+donor_order <- cell_perc_diag %>% filter(cell.type=="Excitatory Neurons") %>% select(projid, perc_cells) 
+donor_order <- donor_order[order(donor_order$perc_cells, decreasing = T),]
+donor_order$n_order = 1:nrow(donor_order)
+
+cell_perc_diag <- cell_perc_diag %>% left_join(donor_order[,c("projid","n_order")])
+
+ggplot(cell_perc_diag, aes(x = reorder(projid, n_order, sum), y=perc_cells, fill=cell.type_group)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~cogdx_group, scales = "free_x") +
+  scale_fill_manual(values=cell_color_map) +
+  theme_classic() + 
+  easy_remove_x_axis() + 
+  labs(x = "Donor", y = "% of cells", fill = "Cell type") 
+```
+
+## Cells proportion 
+```{r cell_prop}
+cell_prop_total = annotation.filt %>% group_by(cell.type) %>% summarise(n_cells = n()) %>% mutate(perc_cells = n_cells/sum(n_cells)) %>%
+  arrange(-perc_cells) %>% select(cell.type, perc_cells) %>% mutate(perc_cells = scales::percent(perc_cells))
+
+createDT(cell_prop_total)
+```
+
+## Class proportion 
+```{r class_prop}
+class_prop_total = annotation.filt %>% group_by(class) %>% summarise(n_cells = n()) %>% mutate(perc_cells = n_cells/sum(n_cells)) %>%
+  arrange(-perc_cells) %>% select(class, perc_cells) %>% mutate(perc_cells = scales::percent(perc_cells))
+
+createDT(class_prop_total)
+```
+
+# Demographics
+## Sex
+```{r sex}
+counts_sex = as.data.frame( table(pheno.filt$msex))
+colnames(counts_sex) = c("Sex", "Frequency")
+counts_sex$Sex = as.character(counts_sex$Sex)
+counts_sex$Sex[counts_sex$Sex == 1] = "Male"
+counts_sex$Sex[counts_sex$Sex == 0] = "Female"
+
+kable(counts_sex) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+## Age range 
+Variable: age at death.
+```{r age_range, message=TRUE, fig.width=6, fig.height=4}
+message(paste0("Age max: ", max(pheno.filt$age_death)))
+message(paste0("Age min: ", min(pheno.filt$age_death)))
+
+ageByDonor = unique(pheno.filt[,c("projid", "age_death", "msex")])
+ageByDonor$msex = as.character(ageByDonor$msex)
+ageByDonor$msex[ageByDonor$msex == 1] = "Male"
+ageByDonor$msex[ageByDonor$msex == 0] = "Female"
+
+mean_f = mean(ageByDonor[ageByDonor$msex == "Female", "age_death"], na.rm = T)
+mean_m = mean(ageByDonor[ageByDonor$msex == "Male", "age_death"], na.rm = T)
+
+message(paste0("Age mean female: ", mean_f))
+message(paste0("Age mean male: ", mean_m))
+
+ggplot(ageByDonor, aes(x=age_death, fill=msex)) +
+  geom_histogram(bins = 25, colour='black', position = "stack") +
+  labs(x="Age", y="Donors") +
+  # scale_y_continuous(breaks = (1:20)) +
+  # scale_x_continuous(breaks=seq(20,120,10)) + 
+  geom_vline(xintercept=mean_f, color = "red", linetype="dashed") +
+  geom_vline(xintercept=mean_m, color = "blue", linetype="dashed") +
+  theme_classic()
+```
+
+# Plots by diagnosis
+cogdx = Clinical consensus diagnosis of cognitive status at time of death. 
+
+## Cognitive decline 
+Variable: **cogng_random_slope**. Estimated slope from random effects model for global cognition. 
+```{r slope, fig.width=10, fig.height=6, warning=FALSE}
+# head(pheno.filt[,c("projid", "amyloid", "cogdx", "tangles", "cogng_random_slope")])
+ggplot(data = pheno.filt, aes(x=projid, y = cogng_random_slope)) + 
+  geom_point() +
+  facet_wrap(~cogdx) +
+  easy_remove_x_axis() +
+  labs(x = "Individual", y = "Slope for global cognition")
+```
+
+## Amyloid
+Overall **amyloid** level - Mean of 8 brain regions. 
+```{r amyloid, fig.width=10, fig.height=6, warning=FALSE}
+ggplot(data = pheno.filt, aes(x=projid, y = amyloid)) + 
+  geom_point() +
+  facet_wrap(~cogdx) +
+  easy_remove_x_axis() +
+  labs(x = "Individual", y = "Amyloid level")
+```
+
+## Tangles
+**Tangle** density - Mean of 8 brain regions.
+```{r tangles, fig.width=10, fig.height=6, warning=FALSE}
+ggplot(data = pheno.filt, aes(x=projid, y = tangles)) + 
+  geom_point() +
+  facet_wrap(~cogdx) +
+  scale_y_continuous(breaks = seq(0, 60, by=10)) +
+  easy_remove_x_axis() +
+  labs(x = "Individual", y = "Tangles density") 
+```
+
+# Plots for cogdx_group
+T test for pairwise comparisons. 
+
+Anova for global p-value.
+```{r cogdx_group, fig.width=12, fig.height=6, warning=FALSE, dpi=300}
+pheno.filt$cogdx_3gp_desc = pheno.filt$cogdx_3gp
+pheno.filt$cogdx_3gp_desc[pheno.filt$cogdx_3gp_desc == 1] <- "NCI"
+pheno.filt$cogdx_3gp_desc[pheno.filt$cogdx_3gp_desc == 2] <- "MCI"
+pheno.filt$cogdx_3gp_desc[pheno.filt$cogdx_3gp_desc == 3] <- "AD"
+  
+my_comparisons = list(c("NCI", "AD"), c("NCI", "MCI"), c("MCI", "AD"))
+
+p1 <- ggplot(pheno.filt, aes(x = cogdx_3gp_desc, y = cogng_random_slope)) + 
+  geom_boxplot(notch = F, na.rm = T) + 
+  stat_compare_means(comparisons = my_comparisons, method = "t.test")+
+  stat_compare_means(method = "anova", label.y = 0.4) + 
+  geom_jitter() +
+  labs(x = "Diagnosis of cognitive status", y = "Slope for global cognition") +
+  theme_classic()
+  
+p2 <- ggplot(pheno.filt, aes(x = cogdx_3gp_desc, y = amyloid)) + 
+  geom_boxplot(notch = F, na.rm = T) + 
+  stat_compare_means(comparisons = my_comparisons, method = "t.test")+
+  stat_compare_means(method = "anova", label.y = 30) + 
+  geom_jitter() +
+  labs(x = "Diagnosis of cognitive status", y = "Amyloid levels") +
+  theme_classic()
+
+p3 <- ggplot(pheno.filt, aes(x = cogdx_3gp_desc, y = tangles)) + 
+  geom_boxplot(notch = F, na.rm = T) + 
+  stat_compare_means(comparisons = my_comparisons, method = "t.test")+
+  stat_compare_means(method = "anova", label.y = 90) + 
+  geom_jitter() +
+  labs(x = "Diagnosis of cognitive status", y = "Tangles density") +
+  theme_classic()
+
+grid.arrange(p1, p2, p3, ncol=3)
+```
+
+# Session Info
+```{r}
+sessionInfo()
+```
+

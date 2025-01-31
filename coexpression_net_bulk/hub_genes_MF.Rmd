@@ -1,0 +1,175 @@
+---
+title: "SpeakEasy clusters: MF"
+subtitle: "Checking the network topology"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo Vialle 
+ | 
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r Helper Functions, echo = FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+```
+
+```{r load_packages, message=F, warning=F}
+library(tidyverse)
+library(reshape2)
+library(ggeasy)
+
+net_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_net_MF/"
+expression_dir = "/pastel/projects/speakeasy_dlpfc/"
+work_dir = "/pastel/Github_scripts/SpeakEasy_dlpfc/bulk_dlpfc/"
+```
+
+# Top 5 hub genes
+Hub genes are the most connected genes in a module so, here we list the top ones by module. 
+```{r cor_matrix, message=F}
+#############################
+# Edges table
+#############################
+
+################################## Variables to set
+# edge_weight2plot = 0.01 # Filter the edges by this value. This is the fraction of the top edge correlations. 0.1 = top 10%.
+edge_weight_1 = 1 # We don't wanna plot the correlations = 1 
+correlation_method = "pearson"
+################################## Done
+
+# Expression data for a single set:
+load(paste0(expression_dir, "exprdata_byregion.Rdata")) 
+expr_matx = as.data.frame(exprData_MF) # Residuals of the expression
+
+gene_modules = read.table(paste0(net_dir, "geneBycluster.txt"), header = T, stringsAsFactors = F) # clusters from SpeakEasy
+gene_modules_size = gene_modules %>% group_by(cluster_lv3) %>% summarise(n = n()) %>% filter(n >= 30)
+n_modules = nrow(gene_modules_size)
+  
+nodes_df = data.frame()
+edges_df = data.frame()
+
+for(i in 1:n_modules){
+ # i=1
+  mod2plot = gene_modules_size$cluster_lv3[i]
+  modSize = gene_modules_size$n[i]
+    
+  # Select the expression values for the module of interest 
+  to_plot = gene_modules$ensembl[gene_modules$cluster_lv3 == mod2plot]
+  expr_matx_mod = expr_matx[to_plot, ]
+    
+  #Let's calculate the correlation matrix
+  matx_cor = cor(t(expr_matx_mod), method = correlation_method) # must be gene by gene
+  matx_cor_m = melt(matx_cor)
+  colnames(matx_cor_m) = c("ensembl1", "ensembl2", "value")
+   
+  matx_cor_temp = matx_cor_m %>% left_join(gene_modules[, c("ensembl", "symbol")], by=c("ensembl1" = "ensembl"))
+  colnames(matx_cor_temp) = c("ensembl1", "ensembl2", "value", "from_node")
+    
+  # Complete correlation matrix 
+  matx_cor_temp2 = matx_cor_temp %>% left_join(gene_modules[, c("ensembl", "symbol")], by=c("ensembl2" = "ensembl"))
+  colnames(matx_cor_temp2) = c("ensembl1", "ensembl2", "value", "from_node", "to_node")
+    
+  # Filter the edges based on correlation (correlation is used as weight here)
+  edges_before_filtering = matx_cor_temp2[which(abs(matx_cor_temp2$value) != edge_weight_1), ]
+    
+  #order_of_edges = order(abs(edges_before_filtering$value), decreasing = T)
+  #order_of_edges_filt = order_of_edges[1:round(length(order_of_edges)*edge_weight2plot)]
+  #edges_filtered = edges_before_filtering[order_of_edges_filt,]
+    
+  # edges2keep = which(edges_before_filtering$value >= (median(abs(edges_before_filtering$value)))) # Get the edges > than the median  
+  edges2keep = which(edges_before_filtering$value >= quantile(abs(edges_before_filtering$value), 3/4)) # Get the edges on the 3/4 quantiles 
+  edges_filtered = edges_before_filtering[edges2keep,]
+    
+  colnames(edges_filtered) = c("fromNode", "toNode", "weight", "fromAltName", "toAltName") # match names for Cytoscape input
+    
+  # Remove NAs and duplicated ensembls 
+  #edges_filtered = na.omit(edges_filtered)
+  #edges_filtered = edges_filtered[! duplicated(edges_filtered), ]
+  edges_filtered_df = edges_filtered
+  edges_filtered_df$module = mod2plot
+  edges_filtered_df$region = "MF"
+    
+  edges_df = rbind(edges_df, edges_filtered_df) # Filtered edges table with all modules from all cell types 
+    
+  #############################
+  # Nodes table 
+  #############################
+  nodes_table = gene_modules[ , c("ensembl", "cluster_lv3", "symbol")]
+  colnames(nodes_table) = c("nodeName", "nodeAttr", "altName") # Match for Cytoscape input 
+  nodes_table = nodes_table[nodes_table$nodeAttr == mod2plot, ] # Only for the module of interest
+    
+  # Apply same filter to the nodes table
+  nodes_filtered = nodes_table[nodes_table$nodeName %in% c(edges_filtered$fromNode,edges_filtered$toNode), ]
+    
+  # Add number of node connections in the filtered network to get the hub nodes
+  nodes_filtered = inner_join(nodes_filtered, 
+                              bind_rows(edges_filtered %>% group_by(fromNode) %>% dplyr::count() %>% dplyr::rename(nodeName = fromNode), 
+                                        edges_filtered %>% group_by(toNode) %>% dplyr::count() %>% dplyr::rename(nodeName = toNode)) %>% 
+                                group_by(nodeName) %>% distinct() %>% tally(wt = n))
+    
+  hub_genes_list = nodes_filtered[order(nodes_filtered$n, decreasing = T), ]$altName[1:5] # Hubs are the most connected nodes in a module (after filtering the edges)
+    
+  nodes_filtered_df = nodes_filtered[order(nodes_filtered$n, decreasing = T),]
+  nodes_filtered_df$module_size = modSize
+  nodes_filtered_df$region = "MF"
+  nodes_df = rbind(nodes_df, nodes_filtered_df) # Filtered nodes table with all modules from all cell types 
+}
+
+# Top hub genes 
+nodes_df_top = nodes_df %>% 
+  group_by(region, module_size) %>% 
+  arrange(-n) %>% 
+  slice_head(n = 5)
+
+# write.table(nodes_df_top, file = paste0(work_dir, "hub_genes_MF.txt"), sep = "\t", quote = F, row.names = F)
+
+createDT(nodes_df_top)
+
+# save(nodes_df, file = paste0(work_dir, "n_connections_MF.Rdata"))
+# nodes_df %>% group_by(celltype,module_size) %>% summarise(n_genes = n()) %>% arrange(n_genes)
+```
+
+# Plot connections 
+We want to check if the network has a scale-free topology. 
+
+**Scale-free:** many nodes with only a few links. A few hubs with large number of links. 
+
+**Random:** most nodes have the same number of links. No highly connected nodes resulting in a Poison distribution. 
+```{r, fig.width=5, fig.height=3.5}
+ggplot(nodes_df, aes(x=n)) +
+  geom_histogram(bins = 100, color="black", fill="white") +
+  easy_labs(x = "Number of links (k)", y = "Number of nodes with k links") +
+  theme_classic()
+```
+
+# Session 
+```{r}
+sessionInfo()
+```
+

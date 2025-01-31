@@ -1,0 +1,475 @@
+---
+title: "SpeakEasy clusters: MF"
+subtitle: "Module Membership"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo Vialle 
+ | 
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r Helper Functions, echo = FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+```
+
+```{r load_packages, message=F, warning=F}
+library(tidyverse)
+library(WGCNA)
+library(ggeasy)
+library(ggpubr)
+
+net_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_net_MF/"
+expression_dir = "/pastel/projects/speakeasy_dlpfc/"
+work_dir = "/pastel/Github_scripts/SpeakEasy_dlpfc/bulk_dlpfc/"
+resource_dir = "/pastel/resources/20220203_snRNAseq_AMPAD/"
+cell_dir = "/pastel/resources/cell_proportion_SN/"
+
+```
+
+```{r input_expr }
+### Expression data 
+load(paste0(expression_dir, "exprdata_byregion.Rdata")) 
+expr_matx = as.data.frame(exprData_MF) # Residuals of the expression
+colnames(expr_matx) = gsub("(.*)_(.*)", "\\2", colnames(expr_matx))
+
+### Modules from SE
+modules_file = read.table(paste0(net_dir, "geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+### Eigengenes and average expression 
+load(paste0(net_dir, "lv3_moduleEigengenes.Rdata"))
+mod_eigengene = lv3_moduleEigengenes$eigengenes
+mod_average = lv3_moduleEigengenes$averageExpr
+
+mod_average$projid = gsub("(.*)_(.*)", "\\2", rownames(mod_average)) #get the projid to match with phenotype data 
+rownames(mod_average) = mod_average$projid
+mod_average$projid = NULL
+
+### Phenotype
+# load("/pastel/projects/spatial_t/pseudo_bulk/phenotypes.RData") # phenotypes
+# phenotype_dt = phenotypes[match(rownames(mod_average), phenotypes$projid),]
+# head(phenotype_dt[, c("projid", "cogng_demog_slope")])
+```
+
+# Module membership (MM)
+For each gene, we define a "fuzzy" measure of module membership by correlating its gene expression profile with the module eigengene of a given module. Highly connected intramodular hub genes tend to have high module membership values to the respective module. If the value is close to 1 or -1, the gene is highly correlated with the other genes inside the module.
+
+```{r mm}
+ModuleMembership = as.data.frame(WGCNA::cor(t(expr_matx),
+                                            mod_average,
+                                            method = "pearson",
+                                            use="p")) # this function is faster than the R standand correlation one 
+
+### Get modules >= 30 nodes to show:
+to_show = paste0("AE",as.character( modules_size$module[modules_size$n_nodes >= 30])) 
+mm_filt = ModuleMembership[, colnames(ModuleMembership) %in% to_show ]
+
+# save(mod_average, ModuleMembership, mm_filt, file = paste0(work_dir, "Mod_membership_MF.Rdata"))
+
+# createDT(ModuleMembership)
+```
+
+# Cell counts
+Counts from the SN dataset. 
+```{r sn}
+# Major cell types 
+# cell_prop = read.delim2(paste0(resource_dir, "updated_annotations/cellprop_snRNAseq.txt"), header = T, colClasses = "character", stringsAsFactors = F, check.names = F)
+
+# Sub cell types of SN
+cell_prop = read.delim2(paste0(resource_dir, "updated_annotations/subcellprop_snRNAseq.txt"), header = T, colClasses = "character", stringsAsFactors = F, check.names = F)
+
+# mjr_celltypes1 = names(cell_prop)[grep("Exc.", names(cell_prop))]
+# mjr_celltypes2 = names(cell_prop)[grep("Inh.", names(cell_prop))]
+# mjr_celltypes3 = names(cell_prop)[grep("Oli.", names(cell_prop))]
+mjr_celltypes4 = names(cell_prop)[grep("Ast.", names(cell_prop))]
+mjr_celltypes5 = names(cell_prop)[grep("Mic.", names(cell_prop))]
+# mjr_celltypes6 = names(cell_prop)[grep("OPC.", names(cell_prop))]
+# mjr_celltypes7 = names(cell_prop)[grep("End.", names(cell_prop))]
+
+# mjr_celltypes = c(mjr_celltypes1, mjr_celltypes2, mjr_celltypes3, mjr_celltypes4, mjr_celltypes5, mjr_celltypes6, mjr_celltypes7)
+glia = c(mjr_celltypes4, mjr_celltypes5)
+
+cell_prop_f = cell_prop[, c("projid",glia) ]
+cell_prop_f[,-1] <- sapply(cell_prop_f[,-1], as.numeric)
+```
+
+# Gene significance (GS)
+The absolute value of the correlation between the gene and the trait. In this case, trait is cell counts. 
+
+Shinya: “I wonder if there is any connections between the gene membership of module 3 to the Ast and Mic cells.”
+
+# MF_M3 vs... {.tabset .tabset-fade .tabset-pills} 
+```{r gs}
+projid_in_common = cell_prop_f$projid[which(cell_prop_f$projid %in% colnames(expr_matx))]
+cell_prop_f_in_common = cell_prop_f[match(projid_in_common,cell_prop_f$projid),] 
+expr_mf_m3 = expr_matx[modules_file$ensembl[modules_file$cluster_lv3 == 3], projid_in_common]
+# dim(expr_mf_m3)
+# dim(cell_prop_f_in_common)
+
+GS_mf_m3 = as.data.frame(WGCNA::cor(t(expr_mf_m3), cell_prop_f_in_common[-1], use = 'pairwise.complete.obs'))
+
+# join tables 
+mm_filt_gene = mm_filt
+mm_filt_gene$ensembl = rownames(mm_filt_gene)
+GS_mf_m3$ensembl = rownames(GS_mf_m3)
+
+mm_gs_merged = mm_filt_gene %>% inner_join(GS_mf_m3, by="ensembl")
+
+```
+
+## Ast.1 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p1 <- ggplot(mm_gs_merged, aes(x=AE3, y=Ast.1)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Ast.1") +
+  theme_classic()
+
+p1
+```
+
+## Ast.2 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p2 <- ggplot(mm_gs_merged, aes(x=AE3, y=Ast.2)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Ast.2") +
+  theme_classic()
+
+p2
+```
+
+## Ast.3 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p3 <- ggplot(mm_gs_merged, aes(x=AE3, y=Ast.3)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Ast.3") +
+  theme_classic()
+
+p3
+```
+
+## Ast.4 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p4 <- ggplot(mm_gs_merged, aes(x=AE3, y=Ast.4)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Ast.4") +
+  theme_classic()
+
+p4
+```
+
+## Ast.5 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p5 <- ggplot(mm_gs_merged, aes(x=AE3, y=Ast.5)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Ast.5") +
+  theme_classic()
+
+p5
+```
+
+## Ast.6 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p6 <- ggplot(mm_gs_merged, aes(x=AE3, y=Ast.6)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Ast.6") +
+  theme_classic()
+
+p6
+```
+
+## Ast.7 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p7 <- ggplot(mm_gs_merged, aes(x=AE3, y=Ast.7)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Ast.7") +
+  theme_classic()
+
+p7
+```
+
+## Ast.8 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p8 <- ggplot(mm_gs_merged, aes(x=AE3, y=Ast.8)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Ast.8") +
+  theme_classic()
+
+p8
+```
+
+## Ast.9 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p9 <- ggplot(mm_gs_merged, aes(x=AE3, y=Ast.9)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Ast.9") +
+  theme_classic()
+
+p9
+```
+
+## Ast.10 {.tabset .tabset-fade .tabset-pills} 
+```{r ,warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p10 <- ggplot(mm_gs_merged, aes(x=AE3, y=Ast.10)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Ast.10") +
+  theme_classic()
+
+p10
+```
+
+## Mic.1 {.tabset .tabset-fade .tabset-pills} 
+```{r plot3, warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p11 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.1)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.1") +
+  theme_classic()
+
+p11
+```
+
+## Mic.2 {.tabset .tabset-fade .tabset-pills} 
+```{r plot4, warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p12 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.2)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.2") +
+  theme_classic()
+
+p12
+```
+
+## Mic.3 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p13 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.3)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.3") +
+  theme_classic()
+
+p13
+```
+
+## Mic.4 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p14 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.4)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.4") +
+  theme_classic()
+
+p14
+```
+
+## Mic.5 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p15 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.5)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.5") +
+  theme_classic()
+
+p15
+```
+
+## Mic.6 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p16 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.6)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.6") +
+  theme_classic()
+
+p16
+```
+
+## Mic.7 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p17 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.7)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.7") +
+  theme_classic()
+
+p17
+```
+
+## Mic.8 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p18 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.8)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.8") +
+  theme_classic()
+
+p18
+```
+
+## Mic.9 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p19 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.9)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.9") +
+  theme_classic()
+
+p19
+```
+
+## Mic.10 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p20 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.10)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.10") +
+  theme_classic()
+
+p20
+```
+
+## Mic.11 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p21 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.11)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.11") +
+  theme_classic()
+
+p21
+```
+
+## Mic.12 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p22 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.12)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.12") +
+  theme_classic()
+
+p22
+```
+
+## Mic.13 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p23 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.13)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.13") +
+  theme_classic()
+
+p23
+```
+
+## Mic.14 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p24 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.14)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.14") +
+  theme_classic()
+
+p24
+```
+
+## Mic.15 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p25 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.15)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.15") +
+  theme_classic()
+
+p25
+```
+
+## Mic.16 {.tabset .tabset-fade .tabset-pills} 
+```{r , warning=FALSE, message=FALSE, fig.height=3, fig.width=4}
+p26 <- ggplot(mm_gs_merged, aes(x=AE3, y=Mic.16)) +
+  geom_point() + 
+  stat_smooth(method = "lm", se=F) +
+  stat_regline_equation(aes(label = ..adj.rr.label..), show.legend = F) +
+  easy_labs(x = "MM in MF_M3", y = "GS for Mic.16") +
+  theme_classic()
+
+p26
+```
+
+```{r fig.width=25, fig.height=30 eval=FALSE}
+n_plot = 1:26
+n_plotp = paste0("p", n_plot)
+list_of_plots = mget( n_plotp )
+
+pdf("/pastel/Github_scripts/SpeakEasy_dlpfc/figures4paper/sup_material/GS_MM_MF_M3.pdf", width = 15, height = 15)
+ggarrange(plotlist = list_of_plots, nrow = 6, labels = "auto", ncol = 5)
+dev.off()
+```
+
+# Session info
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,287 @@
+---
+title: "Single nuclei RNASeq from DLPFC"
+subtitle: "figures"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo A. Vialle
+ | Shinya Tasaki 
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+params:
+  resources_dir: "/pastel/resources/" # no need to edit
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+#rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r Helper Functions, echo = FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+```
+
+```{r load_packages, message=F, warning=F}
+library(tidyverse)
+library(ggplot2)
+library(tidyverse)
+library(kableExtra)
+library(reshape2)
+library(dplyr)
+library(network)
+library(ggraph)
+library(GGally)
+library(sna)
+library(ggplot2)
+library(ggnetwork)
+library(ggraph)
+library(tidygraph)
+library(ggsci)
+library(data.table)
+library(reshape2)
+library(tidymodels)
+library(furrr)
+library(R.matlab)
+library(BiocParallel)
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+library(gtools)
+library(graphlayouts)
+
+net_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_singlenuclei/2nd_pass/snakemake-sn/results/inh/"
+expression_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_singlenuclei/2nd_pass/snakemake-sn/input/"
+resources_dir = params$resources_dir
+
+# BN folders 
+data_prefix = "inh_m06"
+bn_results_dir = "/pastel/projects/speakeasy_dlpfc/BN/sn_dlpfc_inh_res/inh_modules/inh_m06/"
+BN_run_dir = "/pastel/resources/bayesian_networks/CINDERellA/"
+BN_output_dir = paste0(bn_results_dir,data_prefix,"_res")
+BN_run_data = paste0(bn_results_dir,data_prefix,"_exp.txt")
+```
+
+```{r }
+cat("Preparing phenotypes...")
+
+### phenotype
+phenotype = readRDS(paste0(resources_dir, "phenotypes/basic_Apr2022.rds"))
+phenotype_dt = phenotype$data
+metadata = phenotype$data
+
+### Create custom phenotypes and includes resilience
+phenotype_dt$ad_dementia_status = ifelse(phenotype_dt$cogdx_3gp<3,0,1)
+phenotype_dt$cognitive_impairment_status = ifelse(phenotype_dt$cogdx_3gp<2,0,1)
+phenotype_dt$gpath_sqrt = sqrt(phenotype_dt$gpath)
+phenotype_dt$amyloid_sqrt = sqrt(phenotype_dt$amyloid)
+phenotype_dt$tangles_sqrt = sqrt(phenotype_dt$tangles)
+phenotype_dt$nft_sqrt = sqrt(phenotype_dt$nft)
+phenotype_dt$plaq_d_sqrt = sqrt(phenotype_dt$plaq_d)
+phenotype_dt$plaq_n_sqrt = sqrt(phenotype_dt$plaq_n)
+phenotype_dt$tdp_43_binary = phenotype_dt$tdp_st2
+phenotype_dt$dxpark_status = phenotype_dt$dxpark-1
+resilience = read.csv(paste0(resources_dir, "resilience/resilience_capuano_july2022/R719_CR_ROSMAP.csv"))
+resilience$projid2 = sprintf("%08d", resilience$projid) # Add leading zeros 
+phenotype_dt = phenotype_dt %>% dplyr::left_join(resilience[,-1], by = c("projid"="projid2"))
+
+# save(phenotype_dt, file = paste0(bn_results_dir,"phenotypes.RData"))
+
+cat("Saved:", paste0(bn_results_dir,"phenotypes.RData"))
+```
+
+# Expression data 
+```{r }
+cat("Loading SE modules...")
+
+mod2plot = 6 # Module we want to plot
+# pval_cutoff = 0.05  # p-value cutoff for the BN
+top_n_genes = 100  # Number of top genes to include in the BN
+
+# Expression data for a single set:
+exprData = read.table(paste0(expression_dir, "inh.txt"), header = T, stringsAsFactors = F, check.names = F)
+expr_matx = as.data.frame(exprData) # Residuals of the expression
+gene_modules = read.table(paste0(net_dir, "geneBycluster.txt"), header = T, stringsAsFactors = F) # clusters from SpeakEasy
+
+# Select the expression values for the module of interest 
+to_plot = gene_modules$ensembl[gene_modules$cluster_lv3 == mod2plot]
+expr_matx_mod = expr_matx[to_plot, ]
+
+# save(expr_matx_mod, file = paste0(bn_results_dir,"dataExp.RData"))
+```
+
+```{r }
+cat("\nSelecting modules based on association results...")
+
+load(paste0(bn_results_dir,"phenotypes.RData"))
+load(paste0(bn_results_dir,"dataExp.RData"))
+
+phenotype_match = phenotype_dt[match(colnames(expr_matx_mod),phenotype_dt$projid),]
+expr_matx_mod_t <- as.matrix(t(expr_matx_mod))
+
+#identical(rownames(data4linear_reg),phenotype_match$projid) # TRUE
+
+#Covariates
+covariates_ = c( "cogng_demog_slope",
+                "tangles_sqrt",	
+                "amyloid_sqrt")
+adj_by = c("msex","age_death")
+
+data4linear_reg = cbind(expr_matx_mod_t,phenotype_match[,covariates_,drop=F],phenotype_match[,adj_by,drop=F])
+scale_data = TRUE
+matrix_pvalue = matrix(NA, nrow = length(covariates_), ncol = ncol(expr_matx_mod_t))
+for (x in 1:length(covariates_)){
+  for (y in 1:ncol(expr_matx_mod_t)){
+    x_cov = covariates_[x]
+    y_mod = colnames(data4linear_reg)[y]
+    if(scale_data){
+      form = as.formula(paste(paste0("scale(",y_mod,")"),"~",paste0("scale(",x_cov,")"),"+",paste(adj_by,collapse = "+")))  
+    }else{
+      form = as.formula(paste(y_mod,"~",x_cov,"+",paste(adj_by,collapse = "+")))
+    }
+    matrix_pvalue[x,y] <- coef(summary( lm(form, data = data4linear_reg) ))[1,"Pr(>|t|)"]
+  } 
+}
+rownames(matrix_pvalue) = covariates_
+colnames(matrix_pvalue) = colnames(expr_matx_mod_t)
+matrix_pvalue_adj = matrix(p.adjust(as.vector(as.matrix(matrix_pvalue)), method='bonferroni'),ncol=ncol(matrix_pvalue))
+
+matrix_pvalue_m = reshape2::melt(as.matrix(matrix_pvalue)) %>% 
+  dplyr::group_by(Var2) %>% dplyr::summarise(pval = min(value)) %>% arrange(pval)
+
+top_genes = as.character(matrix_pvalue_m$Var2[1:top_n_genes])
+
+# Save the input expression for the BN
+# write_csv(as.data.frame(expr_matx_mod)[top_genes,], file = BN_run_data, col_names = F)
+cat("\nSaved:", BN_run_data)
+```
+
+```{r, eval=F}
+# CINDERellA has two inputs: exp.txt and output_folder 
+setwd(BN_run_dir)
+cmd_matlab_call = paste0("matlab -nodisplay -nojvm -nosplash -nodesktop -r")
+cmd_matlab_param = paste0("runt=5000; data='",BN_run_data,"'; out_dir='",BN_output_dir,"'; run('",BN_run_dir,"CINDERellA.m')")
+cmd_matlab_run = paste0(cmd_matlab_call, " \"",cmd_matlab_param,"\"")
+cat(cmd_matlab_run)
+system(cmd_matlab_run)
+```
+
+```{r results_dir, echo=FALSE}
+# Results are saved here:
+print(BN_output_dir)
+```
+
+# Read results
+## Edges filtered
+```{r}
+# BN_output_dir = paste0(bn_results_dir,data_prefix,"_res")
+# BN_run_data = paste0(bn_results_dir,data_prefix,"_exp.txt")
+
+# load(file = paste0(bn_results_dir,data_prefix,"_BN_input.RData")) # phenotype_match,gene_net_metadata,mod_eigengen
+# load(file = paste0(bn_results_dir,data_prefix,"_dataExp.RData"))
+
+edgefrq = read_tsv(paste0(BN_output_dir,"/edgefrq.txt"), col_names = c("A","B","freq"), show_col_types = F)
+
+dataExp = expr_matx_mod
+edges_df = na.omit(cbind(edgefrq, rownames(dataExp)[edgefrq$A], rownames(dataExp)[edgefrq$B]))
+colnames(edges_df) = c("fromNode", "toNode", "weight", "fromAltName", "toAltName") # match names for Cytoscape input
+
+edges_df$fromAltName = gsub("(.*)\\.(.*)","\\1",edges_df$fromAltName)
+edges_df$toAltName = gsub("(.*)\\.(.*)","\\1",edges_df$toAltName)
+
+edges_filtered = edges_df[abs(edges_df$weight)>0.45, ] # weight default = 0.33
+rownames(edges_filtered) = NULL
+
+# createDT(edges_filtered %>% arrange(-weight))
+```
+
+## Nodes filtered 
+```{r fig.width=8, fig.height=8}
+nodes_table = data.frame(nodeName = 1:nrow(dataExp), altName = gsub("(.*)\\.(.*)","\\1",rownames(dataExp))) %>% distinct()
+nodes_table$altName = gsub("(.*)\\.(.*)","\\1",nodes_table$altName)
+rownames(nodes_table) = NULL
+nodes_table = na.omit(unique(nodes_table)) %>% left_join(unique(gene_modules[,c("ensembl","gene_name")]), by = c("altName"="ensembl"))
+
+nodes_filtered = nodes_table[nodes_table$altName %in% unique(c(edges_filtered$fromAltName,edges_filtered$toAltName)), ]
+nodes_filtered = nodes_filtered[! duplicated(nodes_filtered$altName), ] 
+createDT(nodes_filtered %>% left_join(reshape2::melt(as.matrix(matrix_pvalue)), by = c("altName"="Var2")) %>%
+  group_by(altName) %>% mutate(best_pval = min(value), 
+                               best_pheno = Var1[which.min(value)],
+                               pvalues = paste0(formatC(value, format = "e", digits = 2), collapse = ";"), 
+                               phenotypes = paste0(Var1, collapse = ";")) %>% 
+  select(nodeName, altName, gene_name, best_pval, best_pheno, pvalues, phenotypes) %>%
+  distinct() %>% arrange(best_pval))
+```
+
+# BN plot 
+```{r function_plot, echo = FALSE, message=FALSE, results='hide', warning=FALSE}
+library(igraph)
+library(ggraph)
+library(graphlayouts)
+library(ggforce)
+library(gtools)
+library(tidyverse)
+plot_geneBN <- function(edges_filtered, nodes_filtered, plot_title = "BN"){
+  # Get the graph object
+  g = igraph::graph_from_data_frame(d = edges_filtered[,c("fromAltName","toAltName","weight")], 
+                            vertices = nodes_filtered[,c("altName","gene_name")], 
+                            directed = T)
+  V(g)$degree <- degree(g, mode = "total")
+  ggraph(g, layout = "auto") +
+    geom_edge_fan(
+      aes(end_cap = circle(node2.degree + 3, "pt"),  
+          #alpha = weight,                              # Edge transparency = freq
+          edge_width = weight),                         # Edge width = 3 * freq
+      edge_colour = "black",                           # Edge color
+      arrow = arrow(angle = 15,                      
+                    type = "closed",
+                    ends = "last",
+                    length = unit(0.15, "inches"))
+      ) +
+    geom_node_point(aes(size = I(degree)+5),              # Node size overlay
+                    color = "#d62728", # inh color  
+                    show.legend = F) +
+    shadowtext::geom_shadowtext(aes(x, y, label = gene_name), 
+                                color = "black", 
+                                size = 3.5, 
+                                bg.colour = "white") +
+    scale_edge_color_continuous(low = "grey66", high = "black") +
+    scale_edge_width(range = c(0.1, 1)) +
+    theme_graph() + 
+    theme(legend.position = "right") + labs(title = plot_title)
+}
+```
+
+```{r plot, warning=FALSE, fig.width=16, fig.height=8}
+# Cairo::CairoPDF(file = "/pastel/Github_scripts/SpeakEasy_dlpfc/figures4paper/v3_may2024/bn_inh06.pdf", width = 15, height = 10)
+plot_geneBN(edges_filtered = edges_filtered,
+          nodes_filtered = nodes_filtered)
+# dev.off()
+```
+
+# Session 
+```{r}
+sessionInfo()
+```
+

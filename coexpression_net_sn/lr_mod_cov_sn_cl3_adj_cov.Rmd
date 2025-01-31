@@ -1,0 +1,588 @@
+---
+title: "Single nuclei from DLPFC"
+subtitle: "Regressions between the modules and the covariates"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo Vialle 
+ | 
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+params:
+  cell_type: "mic"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+> Clusters from level 03 of SE | The regressions are adjusted for age, sex and educ. 
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(ggeasy)
+library(ggplot2)
+library(broom)
+library(gplots)
+library(ggpubr)
+library(tidyverse)
+```
+
+```{r Helper Functions}
+## Create table 
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+
+## Run regression tests
+run_module_trait_association <- function(data4linear_reg, # Matrix with module eigengenes (predictor)
+                                         phenotype_dt, # Matrix with covariates (outcome + covariates)
+                                         pheno_list, # List of phenotypes to be tested (with classes = binomial or gaussian)
+                                         covariates = c("age_death","msex", "educ"), # List of covariates to be adjusted
+                                         verbose = T){ 
+  
+  if (!require("lme4")) install.packages("lme4")
+  if (!require("lmerTest")) install.packages("lmerTest")
+  if (!require("performance")) install.packages("performance")
+  library(lme4)
+  library(lmerTest)
+  library(performance)
+  
+  outcome = names(pheno_list)
+  outcome.family = pheno_list
+  # random_effect = "projid"
+  # avg_over_random_effect = T
+  
+  matrix_rsquared = matrix(NA, nrow = length(outcome), ncol = ncol(mod_average)) #Number of modules
+  matrix_pvalue = matrix(NA, nrow = length(outcome), ncol = ncol(mod_average))
+  
+  for (x in 1:length(pheno_list)){
+    for (y in 1:ncol(mod_average)){
+      outcome_pheno = outcome[x]
+      outcome_type = outcome.family[x]
+
+      dat4test_1 = setNames(as.data.frame(cbind(phenotype_dt[,outcome_pheno],data4linear_reg[,y])), c("outcome","predictor"))
+      if(!is.null(covariates)){
+        dat4test_2 = phenotype_dt[,covariates,drop=F]
+        dat4test = na.omit(cbind(dat4test_1, dat4test_2))
+        formula_string = as.formula(paste0("outcome ~ predictor + ", paste(covariates, collapse = " + ")))
+        if(verbose) print(paste0("Testing (n=",nrow(dat4test),"):  ", outcome_pheno, " ~ ", names(data4linear_reg)[y], " + ", paste(covariates, collapse = " + ")))
+      }else{
+        dat4test = na.omit(dat4test_1)
+        formula_string = as.formula(paste0("outcome ~ predictor"))
+        if(verbose) print(paste0("Testing (n=",nrow(dat4test),"):  ", outcome_pheno, " ~ ", names(data4linear_reg)[y]))
+      }
+      
+      if (outcome_type == "gaussian"){
+        mod.obj0 = lm(formula_string, dat4test, na.action = "na.exclude")
+        matrix_rsquared[x,y] <- summary( mod.obj0 )$adj.r.squared
+        matrix_pvalue[x,y] <- summary( mod.obj0 )$coefficients["predictor","Pr(>|t|)"] #To insert pvalues in the heatmap
+      }
+      if (outcome_type == "binomial"){
+        dat4test$outcome = as.factor(dat4test$outcome)
+        mod.obj1 = glm(formula_string, dat4test, family = binomial, na.action = "na.exclude")
+        matrix_rsquared[x,y] <-  1 - mod.obj1$deviance/mod.obj1$null.deviance # Pseudo r-squared
+        matrix_pvalue[x,y] <- coef(summary(mod.obj1))["predictor",'Pr(>|z|)']
+      }
+    }
+  }
+  
+  rownames(matrix_rsquared) = names(pheno_list)
+  rownames(matrix_pvalue) = names(pheno_list)
+  colnames(matrix_rsquared) = colnames(data4linear_reg)
+  colnames(matrix_pvalue) = colnames(data4linear_reg)
+  
+  matrix_pvalue_df = setNames(reshape2::melt(matrix_pvalue), c("phenotype","module","nom_p"))
+  matrix_rsquared_df = setNames(reshape2::melt(matrix_rsquared), c("phenotype","module","rsquared"))
+  all_stats_df = matrix_pvalue_df %>% left_join(matrix_rsquared_df) %>% arrange(nom_p)
+
+  return(list(all_stats_df = all_stats_df, matrix_rsquared = matrix_rsquared, matrix_pvalue = matrix_pvalue))
+}
+
+plot_module_trait_association_heatmap <- function(res_test, to_show, show_only_significant = F, signif_cutoff = c("***","**","*")){
+  library(ComplexHeatmap)
+  library(circlize)
+  library(RColorBrewer)
+
+  matrix_rsquared = res_test$matrix_rsquared
+  matrix_pvalue = res_test$matrix_pvalue
+  
+  matrix_rsquared_to_plot = matrix_rsquared[,to_show]
+  matrix_pvalue_to_plot = matrix_pvalue[,to_show]
+  
+  # Adjust P-values by each phenotype separately.
+  adj_matrix_pvalue_to_plot = matrix_pvalue_to_plot
+  for(i in 1:nrow(matrix_pvalue_to_plot)){
+    adj_matrix_pvalue_to_plot[i,] = p.adjust(matrix_pvalue_to_plot[i,], method = "bonferroni")
+  }
+  adj_matrix_pvalue_to_plot.signif <- symnum(adj_matrix_pvalue_to_plot, corr = FALSE, na = FALSE, 
+                                             cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, 1), 
+                                             symbols = c("***", "**", "*", ".", " "))
+      
+  log_matrix_pvalue_to_plot = -log10(matrix_pvalue_to_plot)
+  dimnames(log_matrix_pvalue_to_plot) = dimnames(log_matrix_pvalue_to_plot)
+  
+  if(show_only_significant){
+    if(is.numeric(signif_cutoff)){
+      to_keep = colSums(adj_matrix_pvalue_to_plot <= signif_cutoff) > 0
+    }else{
+      to_keep = rep(F,ncol(adj_matrix_pvalue_to_plot.signif))
+      for(cut_i in signif_cutoff){
+        to_keep = to_keep | colSums(adj_matrix_pvalue_to_plot.signif == cut_i) > 0 # change for the significance you want 
+      }
+    }
+    log_matrix_pvalue_to_plot = log_matrix_pvalue_to_plot[,to_keep,drop=F]
+    adj_matrix_pvalue_to_plot.signif = adj_matrix_pvalue_to_plot.signif[,to_keep,drop=F]
+  }
+  
+  matrix_pvalue_to_plot_labels = formatC(log_matrix_pvalue_to_plot, format = "f", digits = 2)
+  log_matrix_pvalue_to_plot_t = t(log_matrix_pvalue_to_plot)
+  
+  # Colored by -log10(pvalue)
+  # Numbers inside cell = -log10(pvalue): nominal
+  Heatmap(log_matrix_pvalue_to_plot_t, name = "-log10(P-value)",
+          cell_fun = function(j, i, x, y, width, height, fill) {
+            if(as.character(t(adj_matrix_pvalue_to_plot.signif)[i,j]) == " "){
+              grid.text( t(matrix_pvalue_to_plot_labels)[i,j], x, y, 
+                        gp = gpar(fontsize = 8))
+            }else{
+              grid.text(paste0( t(matrix_pvalue_to_plot_labels)[i,j],"\n", t(adj_matrix_pvalue_to_plot.signif)[i,j] ), x, y, 
+                        gp = gpar(fontsize = 8))
+            }
+          },
+          col = colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100),
+          row_names_side = "left", show_row_names = T,
+          cluster_rows = F, cluster_columns = F,
+          column_names_gp = gpar(fontsize = 9),
+          row_names_gp = gpar(fontsize = 9),
+          show_row_dend = F, show_column_dend = F, rect_gp = gpar(col = "white", lwd = 1))
+}
+```
+
+```{r Phenotypes_list}
+pheno_list = c("cogng_demog_slope"="gaussian", # Cognitive decline slope. Remove the effect of demog 
+               "cogng_path_slope"="gaussian", # Resilience, removed the effect of path + demog
+               "tangles_sqrt"="gaussian", # Tangle density - Mean of 8 brain regions
+               "amyloid_sqrt"="gaussian", # Overall amyloid level - Mean of 8 brain regions
+               "gpath"="gaussian", # Global burden of AD pathology based on 5 regions
+               "tdp_cs_6reg"="gaussian", # TDP-43, 6 region severity summary
+               "ad_dementia_status"="binomial" # Clinical AD # CT = MCI + NCI 
+               )
+```
+
+
+```{r input_folders}
+net_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_singlenuclei/2nd_pass/snakemake-sn/results/"
+non_modules_dir = "/pastel/Github_scripts/SpeakEasy_dlpfc/figures4paper/v2_mar2024/"
+work_dir = tempdir()
+```
+
+# Run regressions
+Input: Average expression by module. 
+
+```{r regressions, message=FALSE, results='hide', warning=FALSE}
+load("/pastel/projects/spatial_t/pseudo_bulk/phenotypes.RData") # phenotypes
+
+all_stats = data.frame()
+for(cell_i in c("ext","inh","ast","oli","mic","end","opc")){
+  modules_file = read.table(paste0(net_dir, cell_i, "/geneBycluster.txt"), header = T) 
+  modules_size = as.data.frame( table(modules_file$cluster_lv3))
+  colnames(modules_size) = c("module", "n_nodes")
+  
+  ### eigengenes and average expression 
+  load(paste0(net_dir, cell_i,"/lv3_moduleEigengenes.Rdata"))
+  mod_eigengene = lv3_moduleEigengenes$eigengenes
+  mod_average = lv3_moduleEigengenes$averageExpr
+  
+  mod_average$projid = gsub("(.*)_(.*)", "\\2", rownames(mod_eigengene)) #get the projid to match with phenotype data 
+  rownames(mod_average) = mod_average$projid
+  mod_average$projid = NULL
+  
+  data4linear_reg <- mod_average # or mod_eigengene
+  
+  phenotype_dt = phenotypes[match(rownames(data4linear_reg), phenotypes$projid),]
+  all(rownames(data4linear_reg) == phenotype_dt$projid) # Must be TRUE. Match IDs
+  
+  res_test = run_module_trait_association(data4linear_reg, phenotype_dt, pheno_list, covariates = c("age_death","msex", "educ"), verbose = F)
+  matrix_rsquared = res_test$matrix_rsquared
+  matrix_pvalue = res_test$matrix_pvalue
+  save(res_test, file = paste0(work_dir, "results_lr_",cell_i,".Rdata"))
+  
+  stats_df = res_test$all_stats_df
+  stats_df$network = cell_i
+  all_stats = rbind(all_stats, stats_df)
+}
+
+save(all_stats, file = paste0(work_dir, "all_res_test_stats_SN.Rdata"))
+```
+
+
+# Complete table
+Remove the non-modules. 
+```{r table}
+load(paste0(work_dir, "all_res_test_stats_SN.Rdata"))
+
+# Non-modules to be removed (< 30 nodes)
+emods2remove = read.table(paste0(non_modules_dir, "non_modules.txt"), header = T, stringsAsFactors = F)
+
+all_stats$module_temp <- gsub("AE", "M", all_stats$module)
+all_stats$module2 <- paste0(all_stats$network, "_", all_stats$module_temp)
+all_stats$module_temp <- NULL
+
+# Remove non-modules
+all_stats_filt <- all_stats[! all_stats$module2 %in% emods2remove$module2, ] 
+# dim(all_stats_filt) # 1351    6
+# length(unique(all_stats_filt$module2)) # 193
+# length(unique(all_stats_filt$phenotype)) # 7
+
+# Adjust by FDR
+all_stats_filt$FDR = p.adjust(all_stats_filt$nom_p, method = "fdr")
+ 
+createDT(all_stats_filt %>% arrange(nom_p))
+```
+
+# Best hit per module
+```{r}
+# select best hit of each module
+best_hit_mod_assoc = all_stats_filt %>% filter(FDR < 0.05) %>% 
+  group_by(module2) %>% slice_min(order_by = FDR, n = 1) 
+
+createDT(best_hit_mod_assoc)
+```
+
+# Number of significant modules per network
+
+Adjusted by ALL modules and phenotypes. FDR < 0.05
+
+```{r}
+# count number of signif modules per network (at least one trait)
+best_hit_mod_assoc %>% dplyr::select(network,module2) %>% distinct() %>% group_by(network) %>% dplyr::summarise(n = n()) %>%
+  ggplot(aes(x = network, y = n)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = n), vjust = 1.5, color = "white") +
+  theme_classic() +
+  labs(title = "Number of significant modules per network")
+```
+
+# Exploratory visualizations by cell type
+
+Heatmaps
+
+Numbers and colors : -log10(nominal pvalue)
+
+Cutpoints (adjusted pvalue by bonferroni, by phenotype)
+
+< 0.001 = *** 
+
+0.01 = ** 
+
+0.05 = *
+
+0.1 = . 
+
+1 = " " 
+
+# Ext 
+## All modules 
+```{r message=FALSE, results='hide', warning=FALSE, fig.width=5, fig.height=11}
+cell_i = "ext"
+### Modules from SE
+modules_file = read.table(paste0(net_dir, cell_i, "/geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+load(file = paste0(work_dir, "results_lr_",cell_i,".Rdata"))
+
+### Get modules >= 30 nodes to show:
+to_show = paste0("AE",as.character( modules_size$module[modules_size$n_nodes >= 30])) 
+
+# pdf(paste0(work_dir, "assoc_ext_adj.pdf"), width = 5, height = 10)
+plot_module_trait_association_heatmap(res_test, to_show)
+# dev.off()
+```
+
+## Top results
+Top result by covariate. 
+
+```{r best_results1}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+## Nominal pvalue
+```{r np1}
+createDT(matrix_pvalue)
+```
+
+## Significant results 
+Threshold: At least one module with adjusted pvalue < 0.05. 
+
+Method: Bonferroni by column. 
+```{r sig1, fig.height=8, fig.width=5}
+plot_module_trait_association_heatmap(res_test, to_show, show_only_significant = T)
+```
+
+# Inh
+## All modules 
+```{r message=FALSE, results='hide', warning=FALSE, fig.width=5, fig.height=11}
+cell_i = "inh"
+### Modules from SE
+modules_file = read.table(paste0(net_dir, cell_i, "/geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+load(file = paste0(work_dir, "results_lr_",cell_i,".Rdata"))
+
+### Get modules >= 30 nodes to show:
+to_show = paste0("AE",as.character( modules_size$module[modules_size$n_nodes >= 30])) 
+
+# pdf(paste0(work_dir, "assoc_ext_adj.pdf"), width = 5, height = 10)
+plot_module_trait_association_heatmap(res_test, to_show)
+# dev.off()
+```
+
+## Top results
+Top result by covariate. 
+
+```{r best_results2}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+## Nominal pvalue
+```{r np2}
+createDT(matrix_pvalue)
+```
+
+## Significant results 
+Threshold: At least one module with adjusted pvalue < 0.05. 
+
+Method: Bonferroni by column. 
+```{r sig2, fig.height=6, fig.width=5}
+plot_module_trait_association_heatmap(res_test, to_show, show_only_significant = T)
+```
+
+# Oli
+## All modules 
+```{r message=FALSE, results='hide', warning=FALSE, fig.width=5, fig.height=11}
+cell_i = "oli"
+### Modules from SE
+modules_file = read.table(paste0(net_dir, cell_i, "/geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+load(file = paste0(work_dir, "results_lr_",cell_i,".Rdata"))
+
+### Get modules >= 30 nodes to show:
+to_show = paste0("AE",as.character( modules_size$module[modules_size$n_nodes >= 30])) 
+
+# pdf(paste0(work_dir, "assoc_ext_adj.pdf"), width = 5, height = 10)
+plot_module_trait_association_heatmap(res_test, to_show)
+# dev.off()
+```
+
+## Top results
+Top result by covariate. 
+
+```{r best_results3}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+## Nominal pvalue
+```{r np3}
+createDT(matrix_pvalue)
+```
+
+## Significant results 
+Threshold: At least one module with adjusted pvalue < 0.05. 
+
+Method: Bonferroni by column. 
+```{r sig3, fig.height=3.5, fig.width=5}
+plot_module_trait_association_heatmap(res_test, to_show, show_only_significant = T)
+```
+
+# End
+## All modules 
+```{r message=FALSE, results='hide', warning=FALSE, fig.width=5, fig.height=11}
+cell_i = "end"
+### Modules from SE
+modules_file = read.table(paste0(net_dir, cell_i, "/geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+load(file = paste0(work_dir, "results_lr_",cell_i,".Rdata"))
+
+### Get modules >= 30 nodes to show:
+to_show = paste0("AE",as.character( modules_size$module[modules_size$n_nodes >= 30])) 
+
+# pdf(paste0(work_dir, "assoc_ext_adj.pdf"), width = 5, height = 10)
+plot_module_trait_association_heatmap(res_test, to_show)
+# dev.off()
+```
+
+## Top results
+Top result by covariate. 
+
+```{r best_results4}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+## Nominal pvalue
+```{r np4}
+createDT(matrix_pvalue)
+```
+
+## Significant results 
+Threshold: At least one module with adjusted pvalue < 0.05. 
+
+Method: Bonferroni by column. 
+```{r sig4, fig.height=3, fig.width=5}
+plot_module_trait_association_heatmap(res_test, to_show, show_only_significant = T)
+```
+
+# Ast
+## All modules 
+```{r message=FALSE, results='hide', warning=FALSE, fig.width=5, fig.height=11}
+cell_i = "ast"
+### Modules from SE
+modules_file = read.table(paste0(net_dir, cell_i, "/geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+load(file = paste0(work_dir, "results_lr_",cell_i,".Rdata"))
+
+### Get modules >= 30 nodes to show:
+to_show = paste0("AE",as.character( modules_size$module[modules_size$n_nodes >= 30])) 
+
+# pdf(paste0(work_dir, "assoc_ext_adj.pdf"), width = 5, height = 10)
+plot_module_trait_association_heatmap(res_test, to_show)
+# dev.off()
+```
+
+## Top results
+Top result by covariate. 
+
+```{r best_results5}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+## Nominal pvalue
+```{r np5}
+createDT(matrix_pvalue)
+```
+
+## Significant results 
+Threshold: At least one module with adjusted pvalue < 0.05. 
+
+Method: Bonferroni by column. 
+```{r sig5, fig.height=4, fig.width=5}
+plot_module_trait_association_heatmap(res_test, to_show, show_only_significant = T)
+```
+
+# Mic
+## All modules 
+```{r message=FALSE, results='hide', warning=FALSE, fig.width=5, fig.height=11}
+cell_i = "mic"
+### Modules from SE
+modules_file = read.table(paste0(net_dir, cell_i, "/geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+load(file = paste0(work_dir, "results_lr_",cell_i,".Rdata"))
+
+### Get modules >= 30 nodes to show:
+to_show = paste0("AE",as.character( modules_size$module[modules_size$n_nodes >= 30])) 
+
+# pdf(paste0(work_dir, "assoc_ext_adj.pdf"), width = 5, height = 10)
+plot_module_trait_association_heatmap(res_test, to_show)
+# dev.off()
+```
+
+## Top results
+Top result by covariate. 
+
+```{r best_results6}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+## Nominal pvalue
+```{r np6}
+createDT(matrix_pvalue)
+```
+
+## Significant results 
+Threshold: At least one module with adjusted pvalue < 0.05. 
+
+Method: Bonferroni by column. 
+```{r sig6, fig.height=3, fig.width=5}
+plot_module_trait_association_heatmap(res_test, to_show, show_only_significant = T)
+```
+
+# OPCs
+## All modules 
+```{r message=FALSE, results='hide', warning=FALSE, fig.width=5, fig.height=11}
+cell_i = "opc"
+### Modules from SE
+modules_file = read.table(paste0(net_dir, cell_i, "/geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+load(file = paste0(work_dir, "results_lr_",cell_i,".Rdata"))
+
+### Get modules >= 30 nodes to show:
+to_show = paste0("AE",as.character( modules_size$module[modules_size$n_nodes >= 30])) 
+
+# pdf(paste0(work_dir, "assoc_ext_adj.pdf"), width = 5, height = 10)
+plot_module_trait_association_heatmap(res_test, to_show)
+# dev.off()
+```
+
+## Top results
+Top result by covariate. 
+
+```{r best_results7}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+## Nominal pvalue
+```{r np7}
+createDT(matrix_pvalue)
+```
+
+## Significant results 
+Threshold: At least one module with adjusted pvalue < 0.05. 
+
+Method: Bonferroni by column. 
+```{r sig7, fig.height=3.5, fig.width=5}
+plot_module_trait_association_heatmap(res_test, to_show, show_only_significant = T)
+```
+
+
+# Session info
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,202 @@
+---
+title: "Single nuclei RNASeq from DLPFC"
+subtitle: "Module preservation"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo A. Vialle
+ | Shinya Tasaki
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+> Approach: Major cell types (level 3) vs Mostafavi vs MF 
+
+Previous scripts: 01_prepare_input.R and **02_mp_bulk_mostafavi_MajorCelltypes.Rmd**
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(ggeasy)
+library(tidyverse)
+library(colorRamp2)
+```
+
+```{r Helper Functions, echo=FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+
+work_dir = "/pastel/Github_scripts/SpeakEasy_dlpfc/sn_dlpfc/2nd_pass/module_preservation_sn/mp_major_celltypes_mostafavi_mf/" # to save the results 
+```
+
+```{r}
+load(file = paste0(work_dir, "mp_sn_mf_sara.RData"))
+cell_ids = c("ast", "mic", "oli", "end", "opc", "ext", "inh", "Sara", "bulk_MF")
+nSets = length(cell_ids)
+
+res_all = data.frame()
+for (ref in 1:nSets) {
+  for (test in 1:nSets) {
+    if(ref!=test){
+      statsObs = cbind(mp$quality$observed[[ref]][[test]][,-1], mp$preservation$observed[[ref]][[test]][,-1])
+      statsObs$module_id = rownames(statsObs)
+  
+      statsZ = cbind(mp$quality$Z[[ref]][[test]], mp$preservation$Z[[ref]][[test]][,-1])
+      statsZ$module_id = rownames(statsZ)
+  
+      res_df = statsObs %>% dplyr::left_join(statsZ, by = c("module_id"))
+      res_df$ref = cell_ids[ref]
+      res_df$test = cell_ids[test]
+      rownames(res_df) = NULL
+      
+      #res_df2 = cbind(statsObs[, c("medianRank.pres", "medianRank.qual")], signif(statsZ[, c("Zsummary.pres", "Zsummary.qual")], 2))
+      #res_df2$ref = cell_ids[ref]
+      #res_df2$test = cell_ids[test]
+      
+      res_all = bind_rows(res_all,res_df)
+    }
+  }
+}
+
+res_final = res_all[,c("module_id","moduleSize","ref","test",colnames(res_all)[!colnames(res_all) %in% c("module_id","moduleSize","ref","test")])]
+# createDT(res_final)
+```
+
+# N of non-preserved modules
+```{r plot2, fig.width=5, fig.height=4, warning=FALSE}
+res_mtx_sum = res_final %>% 
+  filter(moduleSize >= 30) %>% 
+  select(module_id,ref,test,Zsummary.pres) %>% 
+  mutate(id = paste(ref,module_id,sep = "_")) %>%
+  pivot_wider(id_cols = ref, 
+              names_from = test, 
+              values_from = Zsummary.pres, 
+              values_fn = function(x) sum(x<2, na.rm = T)) %>% 
+  column_to_rownames("ref")
+res_mtx_sum = res_mtx_sum[,rownames(res_mtx_sum)]
+
+suppressPackageStartupMessages(library(ComplexHeatmap))
+library(leaflet)
+
+my.breaks <- c(seq(0, max(res_mtx_sum, na.rm = T), by=1))
+my.colors <- colorBin("Spectral", bins = my.breaks, na.color = "#aaff56", reverse = T, pretty = T)
+
+draw_colnames_45 <- function (coln, gaps, ...) {
+    coord <- pheatmap:::find_coordinates(length(coln), gaps)
+    x     <- coord$coord - 0.5 * coord$size
+    res   <- grid::textGrob(
+      coln, x = x, y = unit(1, "npc") - unit(3,"bigpts"),
+      vjust = 0.75, hjust = 1, rot = 90, gp = grid::gpar(...)
+    )
+    return(res)
+}
+assignInNamespace(
+  x = "draw_colnames",
+  value = "draw_colnames_45",
+  ns = asNamespace("pheatmap")
+)
+
+(p_heat = Heatmap(res_mtx_sum, 
+                  cluster_columns = F, cluster_rows = F, 
+        heatmap_legend_param = list(title = "# modules Zsum<2"),
+        row_names_gp = gpar(fontsize = 10), column_names_gp = gpar(fontsize = 10),
+        column_title = "Test set", 
+        row_title = "Reference set",
+        col = my.colors(my.breaks), 
+        rect_gp = gpar(col = "gray", lwd = .8),
+        cell_fun = function(j, i, x, y, w, h, col) { # add text to each grid
+            grid.text(sprintf("%d", res_mtx_sum[i,j]), x, y, gp = gpar(fontsize = 8))
+          }
+        ))
+```
+
+# Proportion of preserved modules
+```{r, fig.width=6, fig.height=4.5, warning=FALSE}
+#res_final %>% select(module_id,ref,test,Zsummary.pres) %>% mutate(id = paste(ref,module_id,sep = "_")) %>%
+#  pivot_wider(id_cols = id, names_from = test, values_from = Zsummary.pres)
+res_mtx_percPreserved = res_final %>% 
+  filter(moduleSize >= 30 & module_id!="gold") %>% 
+  select(module_id,ref,test,Zsummary.pres) %>%
+  group_by(ref) %>%
+  mutate(id = paste(ref,module_id,sep = "_"), 
+         n_modules = length(unique(module_id))) %>%
+  ungroup() %>% group_by(ref,test) %>%
+  summarise(n_modules = unique(n_modules), n_preserved = sum(Zsummary.pres >=2)) %>%
+  mutate(perc_preserved = round(100*(n_preserved/n_modules),digits = 2))
+
+res_mtx_percPreserved_mat_n = res_mtx_percPreserved %>%
+  pivot_wider(id_cols = ref, 
+              names_from = test, 
+              values_from = n_modules) %>% 
+  column_to_rownames("ref")
+
+res_mtx_percPreserved_mat = res_mtx_percPreserved %>%
+  pivot_wider(id_cols = ref, 
+              names_from = test, 
+              values_from = perc_preserved) %>% 
+  column_to_rownames("ref")
+
+res_mtx_percPreserved_mat_n = res_mtx_percPreserved_mat_n[rownames(res_mtx_sum),colnames(res_mtx_sum)]
+res_mtx_percPreserved_mat = res_mtx_percPreserved_mat[rownames(res_mtx_sum),colnames(res_mtx_sum)]
+
+my.breaks2 <- c(seq(0, max(res_mtx_percPreserved_mat, na.rm = T), by=10))
+my.colors2 <- colorBin("Spectral", bins = my.breaks2, na.color = "#aaff56", reverse = T, pretty = T)
+
+col_fun = colorRamp2(my.breaks2, my.colors2(my.breaks2))
+
+#pdf(file = paste0(work_dir, "mp_prop_preserved.pdf"), width = 6, height = 4.5)
+(p_heat2 = Heatmap(as.matrix(res_mtx_percPreserved_mat), 
+        cluster_columns = F, cluster_rows = F, 
+        heatmap_legend_param = list(title = "% preserved modules"),
+        row_names_gp = gpar(fontsize = 10), 
+        column_names_gp = gpar(fontsize = 10),
+        column_title_side = "bottom",
+        row_names_side = "left",
+        column_names_side = "bottom",
+        column_title = "Test set", 
+        row_title = "Reference set",
+        #col = col_fun, 
+        col = my.colors2(my.breaks2),
+        rect_gp = gpar(col = "gray", lwd = .8),
+        cell_fun = function(j, i, x, y, w, h, col) { # add text to each grid
+          if(!is.na(res_mtx_percPreserved_mat[i,j])){
+            if(res_mtx_percPreserved_mat[i,j] < 90)
+            {grid.text(sprintf("%.1f", res_mtx_percPreserved_mat[i,j]), x, y, gp = gpar(fontsize = 8))}
+            else{ grid.text(sprintf("%.1f", res_mtx_percPreserved_mat[i,j]), x, y, gp = gpar(fontsize = 8, col = "white")) }
+          }else{
+            grid.text(sprintf("%d", res_mtx_percPreserved_mat_n[i,j]), x, y, gp = gpar(fontsize = 8))  
+          }}
+        ))
+
+#dev.off()
+```
+
+# Session info
+```{r}
+sessionInfo()
+```
+
+

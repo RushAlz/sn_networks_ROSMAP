@@ -1,0 +1,310 @@
+---
+title: "SpeakEasy clusters: MF"
+subtitle: "Regressions between the covariates and the eigengenes"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo Vialle 
+ | 
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+> Covariates from the phenotype data | Results adjusted by age, sex and education | Function version March 2023. 
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(ggeasy)
+library(ggplot2)
+library(broom)
+library(gplots)
+library(ggpubr)
+library(tidyverse)
+```
+
+```{r Helper Functions}
+## Create table 
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+
+## Run regression tests
+run_module_trait_association <- function(data4linear_reg, # Matrix with module eigengenes (predictor)
+                                         phenotype_dt, # Matrix with covariates (outcome + covariates)
+                                         pheno_list, # List of phenotypes to be tested (with classes = binomial or gaussian)
+                                         covariates = c("age_death","msex", "educ") # List of covariates to be adjusted
+                                         ){ 
+  
+  if (!require("lme4")) install.packages("lme4")
+  if (!require("lmerTest")) install.packages("lmerTest")
+  if (!require("performance")) install.packages("performance")
+  library(lme4)
+  library(lmerTest)
+  library(performance)
+  
+  outcome = names(pheno_list)
+  outcome.family = pheno_list
+  # random_effect = "projid"
+  # avg_over_random_effect = T
+  
+  matrix_rsquared = matrix(NA, nrow = length(outcome), ncol = ncol(mod_average)) #Number of modules
+  matrix_pvalue = matrix(NA, nrow = length(outcome), ncol = ncol(mod_average))
+  
+  for (x in 1:length(pheno_list)){
+    for (y in 1:ncol(mod_average)){
+      outcome_pheno = outcome[x]
+      outcome_type = outcome.family[x]
+
+      dat4test_1 = setNames(as.data.frame(cbind(phenotype_dt[,outcome_pheno],data4linear_reg[,y])), c("outcome","predictor"))
+      if(!is.null(covariates)){
+        dat4test_2 = phenotype_dt[,covariates,drop=F]
+        dat4test = na.omit(cbind(dat4test_1, dat4test_2))
+        formula_string = as.formula(paste0("outcome ~ predictor + ", paste(covariates, collapse = " + ")))
+        print(paste0("Testing (n=",nrow(dat4test),"):  ", outcome_pheno, " ~ ", names(data4linear_reg)[y], " + ", paste(covariates, collapse = " + ")))
+      }else{
+        dat4test = na.omit(dat4test_1)
+        formula_string = as.formula(paste0("outcome ~ predictor"))
+        print(paste0("Testing (n=",nrow(dat4test),"):  ", outcome_pheno, " ~ ", names(data4linear_reg)[y]))
+      }
+      
+      if (outcome_type == "gaussian"){
+        mod.obj0 = lm(formula_string, dat4test, na.action = "na.exclude")
+        matrix_rsquared[x,y] <- summary( mod.obj0 )$adj.r.squared
+        matrix_pvalue[x,y] <- summary( mod.obj0 )$coefficients["predictor","Pr(>|t|)"] #To insert pvalues in the heatmap
+      }
+      if (outcome_type == "binomial"){
+        dat4test$outcome = as.factor(dat4test$outcome)
+        mod.obj1 = glm(formula_string, dat4test, family = binomial, na.action = "na.exclude")
+        matrix_rsquared[x,y] <-  1 - mod.obj1$deviance/mod.obj1$null.deviance # Pseudo r-squared
+        matrix_pvalue[x,y] <- coef(summary(mod.obj1))["predictor",'Pr(>|z|)']
+      }
+    }
+  }
+  
+  rownames(matrix_rsquared) = names(pheno_list)
+  rownames(matrix_pvalue) = names(pheno_list)
+  colnames(matrix_rsquared) = colnames(data4linear_reg)
+  colnames(matrix_pvalue) = colnames(data4linear_reg)
+  
+  matrix_pvalue_df = setNames(reshape2::melt(matrix_pvalue), c("phenotype","module","nom_p"))
+  matrix_rsquared_df = setNames(reshape2::melt(matrix_rsquared), c("phenotype","module","rsquared"))
+  all_stats_df = matrix_pvalue_df %>% left_join(matrix_rsquared_df) %>% arrange(nom_p)
+
+  return(list(all_stats_df = all_stats_df, matrix_rsquared = matrix_rsquared, matrix_pvalue = matrix_pvalue))
+}
+
+plot_module_trait_association_heatmap <- function(res_test, to_show, show_only_significant = F, signif_cutoff = c("***","**","*")){
+  library(ComplexHeatmap)
+  library(circlize)
+  library(RColorBrewer)
+
+  matrix_rsquared = res_test$matrix_rsquared
+  matrix_pvalue = res_test$matrix_pvalue
+  
+  matrix_rsquared_to_plot = matrix_rsquared[,to_show]
+  matrix_pvalue_to_plot = matrix_pvalue[,to_show]
+  
+  # Adjust P-values by each phenotype separately.
+  adj_matrix_pvalue_to_plot = matrix_pvalue_to_plot
+  for(i in 1:nrow(matrix_pvalue_to_plot)){
+    message("Adjusting P-values by Bonferroni correction by each phenotype separately. Double check if rows of res_test$matrix_pvalue are phenotypes and columns are your features (e.g. modules)")
+    adj_matrix_pvalue_to_plot[i,] = p.adjust(matrix_pvalue_to_plot[i,], method = "bonferroni")
+  }
+  adj_matrix_pvalue_to_plot.signif <- symnum(adj_matrix_pvalue_to_plot, corr = FALSE, na = FALSE, 
+                                             cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, 1), 
+                                             symbols = c("***", "**", "*", ".", " "))
+      
+  log_matrix_pvalue_to_plot = -log10(matrix_pvalue_to_plot)
+  dimnames(log_matrix_pvalue_to_plot) = dimnames(log_matrix_pvalue_to_plot)
+  
+  if(show_only_significant){
+    if(is.numeric(signif_cutoff)){
+      to_keep = colSums(adj_matrix_pvalue_to_plot <= signif_cutoff) > 0
+    }else{
+      to_keep = rep(F,ncol(adj_matrix_pvalue_to_plot.signif))
+      for(cut_i in signif_cutoff){
+        to_keep = to_keep | colSums(adj_matrix_pvalue_to_plot.signif == cut_i) > 0 # change for the significance you want 
+      }
+    }
+    log_matrix_pvalue_to_plot = log_matrix_pvalue_to_plot[,to_keep]
+    adj_matrix_pvalue_to_plot.signif = adj_matrix_pvalue_to_plot.signif[,to_keep]
+  }
+  
+  matrix_pvalue_to_plot_labels = formatC(log_matrix_pvalue_to_plot, format = "f", digits = 2)
+  log_matrix_pvalue_to_plot_t = t(log_matrix_pvalue_to_plot)
+  
+  # Colored by -log10(pvalue)
+  # Numbers inside cell = -log10(pvalue): nominal
+  Heatmap(log_matrix_pvalue_to_plot_t, name = "-log10(P-value)",
+          cell_fun = function(j, i, x, y, width, height, fill) {
+            if(as.character(t(adj_matrix_pvalue_to_plot.signif)[i,j]) == " "){
+              grid.text( t(matrix_pvalue_to_plot_labels)[i,j], x, y, 
+                        gp = gpar(fontsize = 8))
+            }else{
+              grid.text(paste0( t(matrix_pvalue_to_plot_labels)[i,j],"\n", t(adj_matrix_pvalue_to_plot.signif)[i,j] ), x, y, 
+                        gp = gpar(fontsize = 8))
+            }
+          },
+          col = colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100),
+          row_names_side = "left", show_row_names = T,
+          cluster_rows = F, cluster_columns = F,
+          column_names_gp = gpar(fontsize = 9),
+          row_names_gp = gpar(fontsize = 9),
+          show_row_dend = F, show_column_dend = F, rect_gp = gpar(col = "white", lwd = 1))
+}
+```
+
+```{r Phenotypes_list}
+pheno_list = c(# "cogn_global_lv"="gaussian", # Global cognitive function - Average of 19 tests
+               "cogng_demog_slope"="gaussian", # Cognitive decline slope. Remove the effect of demog 
+               "cogng_path_slope"="gaussian", # Resilience, removed the effect of path + demog
+               "tangles_sqrt"="gaussian", # Tangle density - Mean of 8 brain regions
+               # "nft_sqrt"="gaussian", # Neurofibrillary tangle summary based on 5 regions
+               "amyloid_sqrt"="gaussian", # Overall amyloid level - Mean of 8 brain regions
+               # "plaq_n_sqrt"="gaussian", # Neuritic plaque summary based on 5 regions
+               # "plaq_d_sqrt"="gaussian", # Diffuse plaque summary based on 5 regions
+               # "caa_4gp"="gaussian", # Cerebral amyloid angiopathy - 4 stages
+               "gpath"="gaussian", # Global burden of AD pathology based on 5 regions
+               "tdp_cs_6reg"="gaussian", # TDP-43, 6 region severity summary
+               # "parksc_lv"="gaussian", # Global parkinsonian summary score
+               # "cpd_lv"="binomial", # Clinical Parkinson's Disease 
+               # "dxpark_status"="binomial", # Final Clinical Dx - Hx of Parkinson's disease/Parkinsonism (excl 9)
+               "ad_dementia_status"="binomial", # Clinical AD # CT = MCI + NCI 
+               "ci_status"="binomial" # AD+ MCI vs NCI 
+               # "tdp_43_binary"="binomial",
+               # "ci_num2_gct"="binomial", # Cerebral Infarctions - Binary - Gross-Chronic-Any Location
+               # "ci_num2_mct"="binomial", # Cerebral Infarctions - Binary - Micro-Chronic-Any Location
+               # "arteriol_scler"="gaussian", # Arteriolosclerosis - 4 stages
+               # "cvda_4gp2"="gaussian", # Cerebral Atherosclerosis Rating - 4 levels (None - severe)
+               # "vasc_3dis_sum_lv"="gaussian", # Cumulative vascular disease burden - Average of 3 items (ROS/MAP/MARS)
+               # "vasc_risks_sum_lv"="gaussian", # Cumulative vascular disease risk factors - Average of 3 items
+               # "CR_slope_lpm"="gaussian",
+               # "CR_slope_lmm"="gaussian",
+               # "CR_mean_level_lpm"="gaussian",
+               # "CR_mean_level_lmm"="gaussian",
+               # "age_death"="gaussian",
+               # "msex"="binomial"
+               )
+```
+
+```{r input_folders}
+net_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_net_MF/"
+work_dir = "/pastel/Github_scripts/SpeakEasy_dlpfc/bulk_dlpfc/assoc_analysis/"
+```
+
+# Regressions
+Same covariates tested for the ST and SN networks. Show all modules. Input: Average expression by module. 
+
+Numbers and colors : -log10(nominal pvalue)
+
+cutpoints: 
+
+< 0.001 = *** 
+
+0.01 = ** 
+
+0.05 = *
+
+0.1 = . 
+
+1 = " " 
+
+
+# All modules 
+```{r layer_results1, message=FALSE, results='hide', warning=FALSE, fig.width=5, fig.height=11}
+### Modules from SE
+modules_file = read.table(paste0(net_dir, "geneBycluster.txt"), header = T) 
+modules_size = as.data.frame( table(modules_file$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+
+### eigengenes and average expression 
+load(paste0(net_dir, "lv3_moduleEigengenes.Rdata"))
+mod_eigengene = lv3_moduleEigengenes$eigengenes
+mod_average = lv3_moduleEigengenes$averageExpr
+
+mod_average$projid = gsub("(.*)_(.*)", "\\2", rownames(mod_eigengene)) #get the projid to match with phenotype data 
+rownames(mod_average) = mod_average$projid
+mod_average$projid = NULL
+
+data4linear_reg <- mod_average # or mod_eigengene
+
+load("/pastel/projects/spatial_t/pseudo_bulk/phenotypes.RData") # phenotypes
+phenotype_dt = phenotypes[match(rownames(data4linear_reg), phenotypes$projid),]
+all(rownames(data4linear_reg) == phenotype_dt$projid) # Must be TRUE. Match IDs
+
+res_test = run_module_trait_association(data4linear_reg, phenotype_dt, pheno_list, covariates = c("age_death","msex", "educ"))
+matrix_rsquared = res_test$matrix_rsquared
+matrix_pvalue = res_test$matrix_pvalue
+
+### Get modules >= 30 nodes to show:
+to_show = paste0("AE",as.character( modules_size$module[modules_size$n_nodes >= 30])) 
+
+# save(res_test, file = paste0(work_dir, "results_lr_bulk_MF.Rdata"))
+plot_module_trait_association_heatmap(res_test, to_show)
+```
+
+## Top results
+Top result by covariate. 
+
+```{r best_results9}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+## Nominal pvalue
+```{r np}
+createDT(matrix_pvalue)
+```
+
+# Significant results
+## Adj P < 0.05
+Threshold: At least one module with adjusted pvalue < 0.05. 
+
+Method: Bonferroni by column. 
+```{r fig.height=10, fig.width=5}
+plot_module_trait_association_heatmap(res_test, to_show, show_only_significant = T, signif_cutoff = 0.05)
+```
+
+## Adj P < 0.000001
+
+```{r fig.height=4, fig.width=5}
+# pdf(paste0(net_dir, "bulk_DLPFC_topmod.pdf"), width = 5, height = 4)
+plot_module_trait_association_heatmap(res_test, to_show, show_only_significant = T, signif_cutoff = 0.000001)
+# dev.off()
+```
+
+```{r}
+res_test$all_stats_df$adj_pvalue = p.adjust(res_test$all_stats_df$nom_p, 
+                                            method = "fdr")
+
+createDT(res_test$all_stats_df)
+```
+
+# Session info
+```{r}
+sessionInfo()
+```
+

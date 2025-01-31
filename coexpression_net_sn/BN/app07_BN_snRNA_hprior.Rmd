@@ -1,0 +1,536 @@
+---
+title: "Bayesian Network Analysis"
+subtitle: "Cell-specific sn-RNAseq"
+author:  |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+params:
+  results_dir: "/pastel/projects/speakeasy_dlpfc/BN/edges_restricted/" # Will create a folder named by data_prefix here
+  data_prefix: "app07_sn_mic12_mic13_ast10_bonf001_runt500_impute10PCs_restrict_tangles2amyloid" # Prefix for the results
+  SEnet_dir: "/pastel/projects/speakeasy_dlpfc/SpeakEasy_singlenuclei/2nd_pass/snakemake-sn/results/all_cells/" # SE results folder. Expect files named "lv3_moduleEigengenes.Rdata" and "geneBycluster.txt"
+  pval_cutoff: 0.01 # Bonf
+  runt: 500
+  covariates: ["cogng_demog_slope","tangles_sqrt","amyloid_sqrt"]
+  cellFrac_file: "/pastel/resources/20220203_snRNAseq_AMPAD/updated_annotations/subcellprop_snRNAseq.txt"
+  cells2include: ["Mic.13","Ast.10","Mic.12"]
+  use_eigengene: FALSE # If FALSE, use AverageExpression
+  BN_run_dir: "/pastel/resources/bayesian_networks/CINDERellA_new/" # no need to edit
+  resources_dir: "/pastel/resources/" # no need to edit
+  restrict_edges: TRUE
+  restrict_edges_from: ["tangles"] # Should map 1:1 with restrict_edges_to
+  restrict_edges_to: ["amyloid"] # Should map 1:1 with restrict_edges_from
+output: 
+ rmarkdown::html_document:
+   theme: united
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(tidyverse)
+library(kableExtra)
+library(reshape2)
+library(dplyr)
+library(network)
+library(ggraph)
+library(GGally)
+library(sna)
+library(ggplot2)
+library(ggnetwork)
+library(ggraph)
+library(tidygraph)
+library(ggsci)
+library(data.table)
+library(reshape2)
+library(tidymodels)
+library(furrr)
+library(R.matlab)
+library(BiocParallel)
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+library(gtools)
+library(graphlayouts)
+
+knitr::opts_chunk$set( 
+  warning=FALSE,
+  message=FALSE)
+```
+
+```{css zoom-lib-src, echo = FALSE, eval = F}
+script src = "https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"
+```
+
+```{js zoom-jquery, echo = FALSE}
+ $(document).ready(function() {
+    $('body').prepend('<div class=\"zoomDiv\"><img src=\"\" class=\"zoomImg\"></div>');
+    // onClick function for all plots (img's)
+    $('img:not(.zoomImg)').click(function() {
+      $('.zoomImg').attr('src', $(this).attr('src')).css({width: '100%'});
+      $('.zoomDiv').css({opacity: '1', width: 'auto', border: '1px solid white', borderRadius: '5px', position: 'fixed', top: '50%', left: '50%', marginRight: '-50%', transform: 'translate(-50%, -50%)', boxShadow: '0px 0px 50px #888888', zIndex: '50', overflow: 'auto', maxHeight: '100%'});
+    });
+    // onClick function for zoomImg
+    $('img.zoomImg').click(function() {
+      $('.zoomDiv').css({opacity: '0', width: '0%'}); 
+    });
+  });
+```
+
+```{r Helper Functions, echo=FALSE}
+# Enrichment
+source("/pastel/Github_scripts/SpeakEasy_net/downstream_speakeasy/speakeasy_downstream_lib.R") # Fisher test
+source("/pastel/Github_scripts/OtherProjects/useful_scripts/common_lib.R")
+```
+
+## Run parameters 
+
+```{r}
+# Prefix for the results
+data_prefix = params$data_prefix
+
+# Modules to include in the BN
+pval_cutoff = params$pval_cutoff # P-value cutoff for module-trait associations
+runt = params$runt # Runtime for CINDERellA
+
+# Add covariates to the module avg matrix (avoid adding more than 3, since traits tend to correlate with each other)
+covariates = params$covariates
+
+# Folder with SE module eigengenes
+net_dir = params$SEnet_dir
+
+cellFrac_file = params$cellFrac_file # File with cell fractions
+cells2include = params$cells2include # Cells to include in the BN
+
+use_eigengene = params$use_eigengene # If FALSE, use AverageExpression
+restrict_edges = params$restrict_edges # If TRUE, tangles upstream of amyloid, and cog. decline upstream tangles/amyloid will not be allowed
+restrict_edges_from = params$restrict_edges_from
+restrict_edges_to = params$restrict_edges_to
+
+BN_run_dir = params$BN_run_dir
+resources_dir = params$resources_dir
+bn_results_dir = paste0(params$results_dir,"/",data_prefix,"/")
+BN_output_dir = paste0(bn_results_dir,data_prefix,"_res")
+BN_run_data = paste0(bn_results_dir,data_prefix,"_exp.txt")
+
+print(params)
+```
+
+## BN input/parameters 
+
+`no need to edit`
+
+CINDERellA has two inputs: exp.txt and output_folder
+
+Here we create the exp.txt by merging gene/moddule data with traits.
+
+```{r message=T, eval=T}
+message("Creating folders...")
+
+system(paste0("mkdir -p ",bn_results_dir))
+system(paste0("mkdir -p ",BN_output_dir))
+
+save(params, file = paste0(bn_results_dir,"params.rds"))
+```
+
+## Speakeasy input/parameters 
+
+### 1. Phenotypes
+
+Just getting the phenotype matrix and creating some custom phenotypes. This will be filtered later to match samples from the networks.
+
+```{r, message=T, eval=T}
+message("Preparing phenotypes...")
+
+load("/pastel/projects/spatial_t/pseudo_bulk/phenotypes.RData") # phenotypes that match with the previous regression analysis 
+# load("/pastel/projects/spatial_t/pseudo_bulk/phenotypes_includeZeros.RData") # phenotypes
+phenotype_dt = phenotypes
+
+save(phenotype_dt, file = paste0(bn_results_dir,"phenotypes.RData"))
+
+message("Saved: ", paste0(bn_results_dir,"phenotypes.RData"))
+```
+
+### 2. Assign cell-type module annotations
+
+```{r message=T, eval=T}
+message("Assigning cell-type module annotations...")
+
+library(purrr)
+get_modCellType <- function(gene_net){
+  path_to_files = "/pastel/resources/gene_lists/celltype_markers/"
+  geneList_file_names = c("m109_mostafavi.txt",
+                          "GWAS_AD_Bel2022.txt")
+  genes_universe = gene_net$ensembl
+  cluster_lables = gene_net$module
+  geneAnnotation_lists = parseGeneLists(path_to_files, geneList_file_names, genes_universe)
+  gene_cluster_enrich = moduleEnrich(genes_universe, cluster_lables, geneAnnotation_lists)
+  return(gene_cluster_enrich)
+}
+
+# Gene-module assignments
+gene_net = read.table(file = paste0(net_dir, "geneBycluster.txt"), sep = "\t", header = T)
+
+gene_net$module = paste0("ME",gene_net$cluster_lv3)
+gene_net = gene_net %>% group_by(module) %>% mutate(module_size = n())
+gene_net = gene_net %>% filter(module_size >= 30)
+
+# Get enrichments using gene lists
+module_gene_celltype = get_modCellType(gene_net)
+
+module_gene_celltype_top = module_gene_celltype[module_gene_celltype$p_bonferroni < 0.05,] %>% 
+  group_by(module_id) %>% 
+  mutate(module_id, annotation = paste0(unique(gsub("(.*?) (.*)","\\1",gene_list)), collapse = ";")) %>%
+  select(module_id,annotation) %>% 
+  distinct()
+
+gene_net_annot = gene_net %>% 
+  left_join(module_gene_celltype_top, by = c("module"="module_id"))
+
+gene_net_metadata = gene_net_annot %>% 
+  dplyr::select(module, module_size, annotation) %>%
+  distinct() %>% arrange(-module_size)
+
+save(gene_net_metadata, file = paste0(bn_results_dir,"gene_net_metadata.RData"))
+
+message("Saved: ", paste0(bn_results_dir,"gene_net_metadata.RData"))
+```
+
+### 3. Load Eigengenes
+
+```{r message=T, eval=T}
+message("Loading SE modules...")
+
+load(paste0(bn_results_dir,"gene_net_metadata.RData"))
+load(paste0(bn_results_dir,"phenotypes.RData"))
+
+net_modules = read.table(file = paste0(net_dir, "geneBycluster.txt"), sep = "\t", header = T)
+modules_size = as.data.frame( table(net_modules$cluster_lv3))
+colnames(modules_size) = c("module", "n_nodes")
+modules_size$module = paste0("ME",modules_size$module)
+
+# Eigengenes and average expression 
+load(paste0(net_dir, "lv3_moduleEigengenes.Rdata"))
+if(use_eigengene){
+  message("Using eigengenes")
+  mod_eigengene = lv3_moduleEigengenes$eigengenes  
+}else{
+  message("Using average expression")
+  mod_eigengene = lv3_moduleEigengenes$averageExpr
+  colnames(mod_eigengene) = gsub("^AE","ME",colnames(mod_eigengene))
+}
+
+mod_eigengene$projID = gsub("(.*)_(.*)", "\\2", rownames(mod_eigengene)) # get the projid to match with phenotype data 
+# all(mod_eigengene$projID %in% phenotype_dt$projid) # Must be TRUE
+rownames(mod_eigengene) = mod_eigengene$projID
+mod_eigengene$projID = NULL
+
+to_show = modules_size$module[modules_size$n_nodes >= 30]
+mod_eigengene = mod_eigengene[,to_show]
+
+# Add a global average module 
+mod_eigengene$ME0_global_avg = rowMeans(mod_eigengene)
+
+save(mod_eigengene, modules_size, file = paste0(bn_results_dir,"mod_eigengene.RData"))
+message("Saved: ", paste0(bn_results_dir,"mod_eigengene.RData"))
+```
+
+### 4. Select Modules based on (pre-computed) association results
+
+```{r message=T, eval=T}
+message("Selecting modules based on association results...")
+
+load(paste0(bn_results_dir,"gene_net_metadata.RData"))
+load(paste0(bn_results_dir,"phenotypes.RData"))
+load(paste0(bn_results_dir,"mod_eigengene.RData"))
+
+work_dir = "/pastel/Github_scripts/SpeakEasy_dlpfc/figures4paper/v2_mar2024/"
+assoc_dir = "/pastel/Github_scripts/SpeakEasy_dlpfc/sn_dlpfc/2nd_pass/eigen_reports/save_lr_adjcov/"
+
+# Non-modules to be removed (< 30 nodes)
+emods2remove = read.table(paste0(work_dir, "non_modules.txt"), header = T, stringsAsFactors = F)
+
+# Load association results 
+load(paste0(assoc_dir, "all_res_test_stats_SN.Rdata"))
+all_stats$module_temp <- paste0(all_stats$network, "_M", all_stats$module)
+all_stats$module2 <- gsub("MAE", "M", all_stats$module_temp)
+all_stats$module_temp = NULL 
+
+# Remove non-modules 
+all_stats_filt <- all_stats[! all_stats$module2 %in% emods2remove$module2, ]
+all_stats_filt$network = as.factor(all_stats_filt$network)
+
+pheno_variable = c("cogng_demog_slope","amyloid_sqrt","tangles_sqrt")
+
+all_stats_bonf = all_stats_filt %>% 
+  filter(phenotype %in% pheno_variable) %>%
+  group_by(phenotype) %>% # Adjust by phenotype separately
+  mutate(bonf_p = p.adjust(nom_p, method = "bonferroni")) %>%
+  filter(bonf_p <= pval_cutoff) # Bonferroni correction for all tests (modules X phenotypes; 1544 tests)
+
+signifMods = unique(all_stats_bonf$module2)
+signifMods = gsub("(.*)_M(.*)","ME\\2_\\1",signifMods)
+
+save(signifMods, file = paste0(bn_results_dir,"mod_Select.RData"))
+message("Saved: ", paste0(bn_results_dir,"mod_Select.RData"))
+```
+
+### 5. Cell fractions
+
+```{r, message=T, eval=T}
+message("Preparing cell fractions...")
+
+cell_prop = read.delim2(cellFrac_file, 
+                        header = T, 
+                        colClasses = "character", 
+                        stringsAsFactors = F, 
+                        check.names = F)
+
+cell_prop = cell_prop %>% column_to_rownames("projid")
+cell_prop = as.data.frame(t(cell_prop)) %>% mutate_if(is.character, as.numeric)
+
+# Impute missing values for cell_fraction
+if (!require("missMDA")) install.packages("missMDA")
+cell_prop.imputed = missMDA::imputePCA(cell_prop,ncp=10)
+cell_prop = cell_prop.imputed$completeObs
+cell_prop[cell_prop < 0] = 0
+
+cell_prop = as.data.frame(t(cell_prop[cells2include,])) %>% na.omit()
+
+save(cell_prop, file = paste0(bn_results_dir,"cell_prop.RData"))
+message("Saved: ", paste0(bn_results_dir,"cell_prop.RData"))
+```
+
+### 6. Write BN inputs
+
+```{r message=T, eval=T}
+message("Writing BN inputs...")
+
+load(paste0(bn_results_dir,"gene_net_metadata.RData")) # gene_net_metadata
+load(paste0(bn_results_dir,"phenotypes.RData")) # phenotype_dt
+load(paste0(bn_results_dir,"mod_eigengene.RData")) # mod_eigengene
+load(paste0(bn_results_dir,"cell_prop.RData")) # cell_prop
+load(paste0(bn_results_dir,"mod_Select.RData")) # signifMods
+
+mod_eigengene = mod_eigengene[,signifMods]
+# Matching all tables
+donor_match_1 = base::intersect(unique(phenotype_dt$projid), rownames(mod_eigengene))
+donor_match_2 = base::intersect(donor_match_1, rownames(cell_prop))
+donor_match = donor_match_2
+
+phenotype_match = phenotype_dt[match(donor_match,phenotype_dt$projid),]
+mod_eigengene_match = mod_eigengene[match(donor_match,rownames(mod_eigengene)),]
+cell_prop_match = cell_prop[match(donor_match,rownames(cell_prop)),]
+cell_prop_match = as.matrix(cell_prop_match)
+gene_net_metadata_match = gene_net_metadata[match(colnames(mod_eigengene_match),gene_net_metadata$module),]
+
+#################################################################################
+## 1. exp.txt (row = gene/modules/covariates; column = individuals/samples avg; no rownames/colnames)
+
+dataExp = t(na.omit(cbind( mod_eigengene_match, phenotype_match[,covariates,drop=F], cell_prop_match )))
+# dim(dataExp) # 19 402
+# Save dataExp to csv
+write_csv(as.data.frame(dataExp), file = BN_run_data, col_names = F)
+
+#################################################################################
+## 2. allowed_edges.csv (row = from; to; allowed; no rownames/colnames)
+
+# Restrict allowed edges. If 1 then connection is allowed. If 0 then connection is not allowed.
+# Format must be a csv table with 3 columns: from, to, allowed. No rownames/colnames, just the positions from dataExp matrix
+allowed_edges = matrix(1, nrow = nrow(dataExp), ncol = nrow(dataExp))
+rownames(allowed_edges) = rownames(dataExp)
+colnames(allowed_edges) = rownames(dataExp)
+allowed_edges_m = reshape2::melt(allowed_edges)
+colnames(allowed_edges_m) = c("from","to","allowed")
+
+if(restrict_edges){
+  for(i in 1:length(restrict_edges_from)){
+    match_from = allowed_edges_m$from %in% grep(restrict_edges_from[i],allowed_edges_m$from, value=T)
+    match_to = allowed_edges_m$to %in% grep(restrict_edges_to[i],allowed_edges_m$to, value=T)
+    allowed_edges_m$allowed[match_from & match_to] = 0
+  }
+}
+
+# Rename nodes to their respective positions
+allowed_edges_m$from = match(allowed_edges_m$from,rownames(dataExp))
+allowed_edges_m$to = match(allowed_edges_m$to,rownames(dataExp))
+
+# Save csv
+BN_allowed_edges = paste0(bn_results_dir,"allowed_edges.csv")
+write_csv(allowed_edges_m, file = BN_allowed_edges, col_names = F)
+
+#################################################################################
+
+message("Modules included: ", ncol(mod_eigengene_match))
+message("Covariates: ", ncol(phenotype_match[,covariates,drop=F]))
+message("Cell fractions: ", ncol(cell_prop_match))
+message("Sample size merged data: ", ncol(dataExp))
+
+save(phenotype_match,mod_eigengene_match,cell_prop_match,gene_net_metadata_match,dataExp,
+     file = paste0(bn_results_dir,"BN_input.RData"))
+message("Saved: ", paste0(bn_results_dir,"BN_input.RData"))
+```
+
+### Run BN
+
+```{r, eval=T}
+setwd(BN_run_dir)
+cmd_matlab_call = paste0("matlab -nodisplay -nojvm -nosplash -nodesktop -r")
+
+cmd_matlab_param = paste0("runt=",runt,"';",
+                          " data='",BN_run_data,"';",
+                          " allowed_edges='",BN_allowed_edges,"';",
+                          " out_dir='",BN_output_dir,"';",
+                          " run('",BN_run_dir,"CINDERellA.m')")
+cmd_matlab_run = paste0(cmd_matlab_call, " \"",cmd_matlab_param,"\"")
+cat(cmd_matlab_run)
+```
+
+```{r, eval=F}
+system(cmd_matlab_run)
+```
+
+Results are saved here:
+
+```{r}
+print(BN_output_dir)
+```
+
+## Read results
+
+```{r fig.width=12, fig.height=8, eval=TRUE}
+load(file = paste0(bn_results_dir,"BN_input.RData")) 
+params_check = readMat(paste0(BN_output_dir,"/Param.mat"))
+
+edgefrq = read_tsv(paste0(BN_output_dir,"/edgefrq.txt"), col_names = c("A","B","freq"), show_col_types = F)
+
+useBestNet = F
+if(useBestNet){
+  bestNet = read_tsv(paste0(BN_output_dir,"/bmanet.txt"), col_names = c("A","B","freq"), show_col_types = F)
+  edgefrq = bestNet %>% mutate(freq = NA) %>%
+    left_join(edgefrq, by = c("A","B")) %>%
+    mutate(freq = ifelse(is.na(freq.y), freq.x, freq.y)) %>%
+    select(-freq.x, -freq.y) %>%
+    na.omit()
+}
+
+edges_df = na.omit(cbind(edgefrq, rownames(dataExp)[edgefrq$A], rownames(dataExp)[edgefrq$B]))
+colnames(edges_df) = c("fromNode", "toNode", "weight", "fromAltName", "toAltName") # match names for Cytoscape input
+
+# write_tsv(edges_df, file = paste0(BN_output_dir,"/edges.tsv"), col_names = T)
+
+# createDT(edges_df %>% arrange(-weight))
+
+edges_filtered = edges_df[abs(edges_df$weight)>0.4, ]
+rownames(edges_filtered) = NULL
+#edges_filtered %>% arrange(-weight) #%>% filter(fromAltName == "ME3")
+
+nodes_table = data.frame(nodeName = 1:nrow(dataExp), altName = rownames(dataExp)) 
+rownames(nodes_table) = NULL
+nodes_table = nodes_table %>% left_join(gene_net_metadata_match, by = c("altName"="module"))
+nodes_table$nodeAttr = ifelse(grepl("^ME",nodes_table$altName),"Module","Trait")
+nodes_table$annotation = ifelse(grepl("^ME",nodes_table$altName),nodes_table$annotation,"Trait")
+
+annot_set = as.character(na.omit(unique(nodes_table$annotation)))
+names(annot_set) = pal_d3()(length(annot_set))
+annot_set = c(annot_set, grey = NA)
+annot_pal = setNames(as.data.frame(annot_set),"annotation") %>% rownames_to_column("color")
+
+nodes_table = nodes_table %>% left_join(annot_pal)
+
+nodes_filtered = nodes_table[nodes_table$nodeName %in% c(edges_filtered$fromNode,edges_filtered$toNode), ]
+
+mypal = c(ast = "#1F77B4", # ast
+     end = "#FF7F0E", # end
+     ext = "#2CA02C", # ext
+     inh = "#D62728", # inh
+     mic = "#9467BD", # mic
+     opc = "#8C564B", # opc
+     oli = "#E377C2", # oli
+     cells = "white",
+     traits = "grey30"
+     )
+cell_text_color = setNames(mypal[tolower(gsub("(.*)\\.(.*)","\\1",cells2include))],cells2include)
+nodes_filtered$text_color = ifelse(nodes_filtered$altName %in% names(cell_text_color), cell_text_color[nodes_filtered$altName], "black")
+
+nodes_filtered$celltype = ifelse(nodes_filtered$nodeAttr == "Module", gsub("(.*)_(.*)","\\2",nodes_filtered$altName), nodes_filtered$altName)
+nodes_filtered$nodeAttr[nodes_filtered$celltype %in% cells2include] = "cells"
+nodes_filtered$nodeAttr[nodes_filtered$celltype %in% covariates] = "traits"
+nodes_filtered$celltype[nodes_filtered$celltype %in% cells2include] = "cells"
+nodes_filtered$celltype[nodes_filtered$celltype %in% covariates] = "traits"
+
+edges_filtered_bestLink = edges_filtered[,c("fromAltName","toAltName","weight")] %>% 
+  group_by(fromAltName,toAltName) %>%
+  mutate(link = paste(sort(c(fromAltName,toAltName)),collapse = "_")) %>% 
+  group_by(link) %>% slice_max(order_by = weight, n = 1) %>% distinct() 
+
+library(igraph)
+library(ggraph)
+library(graphlayouts)
+library(ggforce)
+
+# Get the graph object
+g = igraph::graph_from_data_frame(d = edges_filtered_bestLink, 
+                          vertices = nodes_filtered[,c("altName","nodeAttr","module_size","annotation","color","text_color","celltype")], 
+                          directed = T)
+
+# this function is borrowed from the ambient package
+normalise <- function(x, from = range(x), to = c(0, 1)) {
+  x <- (x - from[1]) / (from[2] - from[1])
+  if (!identical(to, c(0, 1))) {
+    x <- x * (to[2] - to[1]) + to[1]
+  }
+  x
+}
+
+# map to the range you want
+#V(g)$degree <- degree(g, mode = "in")
+#V(g)$degree <- normalise(V(g)$degree, to = c(3,11))
+
+V(g)$degree <- normalise(na.replace(V(g)$module_size, mean(V(g)$module_size,na.rm = T)), to = c(10,15))
+l <- igraph::layout_as_tree(g, flip.y = T)
+
+# Cairo::CairoPDF(file = "/pastel/Github_scripts/SpeakEasy_dlpfc/figures4paper/v2_mar2024/BN_SN_app07.pdf", width = 10, height = 6.5)
+ggraph(g, layout = 'kk') +
+  geom_edge_fan(
+    aes(end_cap = circle(node2.degree + 4, "pt"),  
+        edge_width = weight,                       # Edge width = 3 * freq
+        alpha = weight),                             # Edge transparency = freq
+    edge_colour = "black",                           # Edge color
+    arrow = arrow(angle = 15,                      
+                  type = "closed",
+                  ends = "last",
+                  length = unit(0.15, "inches"))
+    ) +
+  geom_node_point(aes(size = I(degree),              # Node size overlay
+                      #alpha = .5 + degree,           # Node color fade overlay
+                      fill = celltype,              # Node color overlay
+                      shape = nodeAttr),             # Node shape overlay
+                  color = "black",
+                  show.legend = T) +
+  shadowtext::geom_shadowtext(aes(x, y, label = name), 
+                              color = nodes_filtered$text_color, 
+                              size = 3.5, 
+                              bg.colour = "white") +
+  scale_edge_color_continuous(low = "grey66", high = "black") +
+  scale_edge_width(range = c(0.1, 0.5)) +
+  scale_fill_manual(breaks = names(mypal), values = mypal) +
+  scale_shape_manual(values = c(23,22,21)) +
+  theme_graph() + 
+  theme(legend.position = "right") +
+  guides(fill = guide_legend(override.aes = list(size = 5, shape = c(22,22,22,22,22,23,21))),
+         shape = "none")
+# dev.off()
+```
+
+
+## Session info
+```{r}
+sessionInfo()
+```
