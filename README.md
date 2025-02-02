@@ -11,6 +11,7 @@ Public release of the module trait network analysis for the ROSMAP single-nucleu
 :point_up_2: Choose a folder to see the results. 
 
 
-> Please cite Lopes et al. 2025 [Biorxiv](Link here). 
+> Please cite: Lopes P. K, A. Vialle R, Green G, et al. Gene module-trait network analysis uncovers cell type specific systems and genes relevant to Alzheimers Disease. bioRxiv. Published online February 1, 2025. doi:10.1101/2025.01.31.635970. [Link](https://www.biorxiv.org/content/10.1101/2025.01.31.635970v1). 
+ 
 
 
