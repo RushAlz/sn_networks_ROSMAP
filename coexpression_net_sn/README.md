@@ -49,6 +49,12 @@ Do the modules recapitulate sub-cell types clusters/states? [Results here](https
 
 - [All major cell types + bulk + Mostafavi](https://rushalz.github.io/sn_networks_ROSMAP/coexpression_net_sn/MP/02_mp_bulk_mostafavi_majorCelltypes.html) pairwise. Includes heatmap with the number of non-preserved modules. You can check the percentage of **preserved** [HERE](https://rushalz.github.io/sn_networks_ROSMAP/coexpression_net_sn//MP/02_mp_proportion_Aug2023.html).
 
+:small_orange_diamond: Replication with an external single-nucleus dataset 
+
+ - [MIT filtered](https://rushalz.github.io/sn_networks_ROSMAP/coexpression_net_sn/replication/replication_vs_MIT_filt_summarized.html) single-nucleus. Includes association heatmaps by cell type for the samples NOT used to create the modules.
+
+ - [Showing modules](https://rushalz.github.io/sn_networks_ROSMAP/coexpression_net_sn/replication/replication_vs_MIT_filt_summarized2.html) that replicates in MIT samples NOT included to build the modules.
+
 :small_orange_diamond: Bayesian networks
 
 - [BN for the SN networks](https://rushalz.github.io/sn_networks_ROSMAP/coexpression_net_sn/BN/app07_BN_snRNA_hprior.html). Criteria = with mic.12, mic.13 and ast.10, runt = 500, eMod selection = bonf 0.1, impute 10 PCs, phenotypes downstream of everything else.

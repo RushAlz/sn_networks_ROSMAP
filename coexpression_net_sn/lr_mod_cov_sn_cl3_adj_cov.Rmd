@@ -69,14 +69,15 @@ run_module_trait_association <- function(data4linear_reg, # Matrix with module e
   
   outcome = names(pheno_list)
   outcome.family = pheno_list
-  # random_effect = "projid"
-  # avg_over_random_effect = T
-  
+
   matrix_rsquared = matrix(NA, nrow = length(outcome), ncol = ncol(mod_average)) #Number of modules
   matrix_pvalue = matrix(NA, nrow = length(outcome), ncol = ncol(mod_average))
+  matrix_tstats = matrix(NA, nrow = length(outcome), ncol = ncol(mod_average))
   
   for (x in 1:length(pheno_list)){
     for (y in 1:ncol(mod_average)){
+      # x = 1
+      # y = 1
       outcome_pheno = outcome[x]
       outcome_type = outcome.family[x]
 
@@ -96,12 +97,14 @@ run_module_trait_association <- function(data4linear_reg, # Matrix with module e
         mod.obj0 = lm(formula_string, dat4test, na.action = "na.exclude")
         matrix_rsquared[x,y] <- summary( mod.obj0 )$adj.r.squared
         matrix_pvalue[x,y] <- summary( mod.obj0 )$coefficients["predictor","Pr(>|t|)"] #To insert pvalues in the heatmap
+        matrix_tstats[x,y] <- summary( mod.obj0 )$coefficients["predictor","t value"]
       }
       if (outcome_type == "binomial"){
         dat4test$outcome = as.factor(dat4test$outcome)
         mod.obj1 = glm(formula_string, dat4test, family = binomial, na.action = "na.exclude")
         matrix_rsquared[x,y] <-  1 - mod.obj1$deviance/mod.obj1$null.deviance # Pseudo r-squared
         matrix_pvalue[x,y] <- coef(summary(mod.obj1))["predictor",'Pr(>|z|)']
+        matrix_tstats[x,y] <- summary( mod.obj1 )$coefficients["predictor","z value"]
       }
     }
   }
@@ -110,13 +113,17 @@ run_module_trait_association <- function(data4linear_reg, # Matrix with module e
   rownames(matrix_pvalue) = names(pheno_list)
   colnames(matrix_rsquared) = colnames(data4linear_reg)
   colnames(matrix_pvalue) = colnames(data4linear_reg)
+  rownames(matrix_tstats) = names(pheno_list)
+  colnames(matrix_tstats) = colnames(data4linear_reg)
   
   matrix_pvalue_df = setNames(reshape2::melt(matrix_pvalue), c("phenotype","module","nom_p"))
   matrix_rsquared_df = setNames(reshape2::melt(matrix_rsquared), c("phenotype","module","rsquared"))
-  all_stats_df = matrix_pvalue_df %>% left_join(matrix_rsquared_df) %>% arrange(nom_p)
+  matrix_tstats_df = setNames(reshape2::melt(matrix_tstats), c("phenotype","module","tstats"))
+  all_stats_df = matrix_pvalue_df %>% left_join(matrix_rsquared_df) %>% left_join(matrix_tstats_df) %>%  arrange(nom_p)
 
-  return(list(all_stats_df = all_stats_df, matrix_rsquared = matrix_rsquared, matrix_pvalue = matrix_pvalue))
+  return(list(all_stats_df = all_stats_df, matrix_rsquared = matrix_rsquared, matrix_pvalue = matrix_pvalue, matrix_tstats = matrix_tstats_df))
 }
+
 
 plot_module_trait_association_heatmap <- function(res_test, to_show, show_only_significant = F, signif_cutoff = c("***","**","*")){
   library(ComplexHeatmap)
@@ -256,7 +263,8 @@ all_stats_filt <- all_stats[! all_stats$module2 %in% emods2remove$module2, ]
 
 # Adjust by FDR
 all_stats_filt$FDR = p.adjust(all_stats_filt$nom_p, method = "fdr")
- 
+write_tsv(all_stats_filt, "/pastel/Github_scripts/SpeakEasy_dlpfc/sn_dlpfc/2nd_pass/snModules_ADtraits_results.tsv.gz")
+
 createDT(all_stats_filt %>% arrange(nom_p))
 ```
 

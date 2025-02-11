@@ -1,0 +1,735 @@
+---
+title: "Single nuclei from DLPFC"
+subtitle: "Replication vs MIT data"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo A. Vialle
+ | Shinya Tasaki
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(Seurat)
+library(tidyverse)
+library(kableExtra)
+library(furrr)
+library(future)
+library(janitor)
+library(WGCNA)
+#future::plan(multiprocess)
+
+knitr::opts_chunk$set( 
+  warning=FALSE,
+  message=FALSE)
+```
+
+```{css zoom-lib-src, echo = FALSE, eval=F}
+script src = "https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"
+```
+
+```{js zoom-jquery, echo = FALSE}
+ $(document).ready(function() {
+    $('body').prepend('<div class=\"zoomDiv\"><img src=\"\" class=\"zoomImg\"></div>');
+    // onClick function for all plots (img's)
+    $('img:not(.zoomImg)').click(function() {
+      $('.zoomImg').attr('src', $(this).attr('src')).css({width: '100%'});
+      $('.zoomDiv').css({opacity: '1', width: 'auto', border: '1px solid white', borderRadius: '5px', position: 'fixed', top: '50%', left: '50%', marginRight: '-50%', transform: 'translate(-50%, -50%)', boxShadow: '0px 0px 50px #888888', zIndex: '50', overflow: 'auto', maxHeight: '100%'});
+    });
+    // onClick function for zoomImg
+    $('img.zoomImg').click(function() {
+      $('.zoomDiv').css({opacity: '0', width: '0%'}); 
+    });
+  });
+```
+
+```{r Helper Functions, echo=FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+
+## Run regression tests
+run_module_trait_association <- function(data4linear_reg, # Matrix with module eigengenes (predictor)
+                                         phenotype_dt, # Matrix with covariates (outcome + covariates)
+                                         pheno_list, # List of phenotypes to be tested (with classes = binomial or gaussian)
+                                         covariates = c("age_death","msex", "educ"), # List of covariates to be adjusted
+                                         verbose = T){ 
+  
+  if (!require("lme4")) install.packages("lme4")
+  if (!require("lmerTest")) install.packages("lmerTest")
+  if (!require("performance")) install.packages("performance")
+  library(lme4)
+  library(lmerTest)
+  library(performance)
+  
+  outcome = names(pheno_list)
+  outcome.family = pheno_list
+
+  matrix_rsquared = matrix(NA, nrow = length(outcome), ncol = ncol(mod_average)) #Number of modules
+  matrix_pvalue = matrix(NA, nrow = length(outcome), ncol = ncol(mod_average))
+  matrix_tstats = matrix(NA, nrow = length(outcome), ncol = ncol(mod_average))
+  
+  for (x in 1:length(pheno_list)){
+    for (y in 1:ncol(mod_average)){
+      # x = 1
+      # y = 1
+      outcome_pheno = outcome[x]
+      outcome_type = outcome.family[x]
+
+      dat4test_1 = setNames(as.data.frame(cbind(phenotype_dt[,outcome_pheno],data4linear_reg[,y])), c("outcome","predictor"))
+      if(!is.null(covariates)){
+        dat4test_2 = phenotype_dt[,covariates,drop=F]
+        dat4test = na.omit(cbind(dat4test_1, dat4test_2))
+        formula_string = as.formula(paste0("outcome ~ predictor + ", paste(covariates, collapse = " + ")))
+        if(verbose) print(paste0("Testing (n=",nrow(dat4test),"):  ", outcome_pheno, " ~ ", names(data4linear_reg)[y], " + ", paste(covariates, collapse = " + ")))
+      }else{
+        dat4test = na.omit(dat4test_1)
+        formula_string = as.formula(paste0("outcome ~ predictor"))
+        if(verbose) print(paste0("Testing (n=",nrow(dat4test),"):  ", outcome_pheno, " ~ ", names(data4linear_reg)[y]))
+      }
+      
+      if (outcome_type == "gaussian"){
+        mod.obj0 = lm(formula_string, dat4test, na.action = "na.exclude")
+        matrix_rsquared[x,y] <- summary( mod.obj0 )$adj.r.squared
+        matrix_pvalue[x,y] <- summary( mod.obj0 )$coefficients["predictor","Pr(>|t|)"] #To insert pvalues in the heatmap
+        matrix_tstats[x,y] <- summary( mod.obj0 )$coefficients["predictor","t value"]
+      }
+      if (outcome_type == "binomial"){
+        dat4test$outcome = as.factor(dat4test$outcome)
+        mod.obj1 = glm(formula_string, dat4test, family = binomial, na.action = "na.exclude")
+        matrix_rsquared[x,y] <-  1 - mod.obj1$deviance/mod.obj1$null.deviance # Pseudo r-squared
+        matrix_pvalue[x,y] <- coef(summary(mod.obj1))["predictor",'Pr(>|z|)']
+        matrix_tstats[x,y] <- summary( mod.obj1 )$coefficients["predictor","z value"]
+      }
+    }
+  }
+  
+  rownames(matrix_rsquared) = names(pheno_list)
+  rownames(matrix_pvalue) = names(pheno_list)
+  colnames(matrix_rsquared) = colnames(data4linear_reg)
+  colnames(matrix_pvalue) = colnames(data4linear_reg)
+  rownames(matrix_tstats) = names(pheno_list)
+  colnames(matrix_tstats) = colnames(data4linear_reg)
+  
+  matrix_pvalue_df = setNames(reshape2::melt(matrix_pvalue), c("phenotype","module","nom_p"))
+  matrix_rsquared_df = setNames(reshape2::melt(matrix_rsquared), c("phenotype","module","rsquared"))
+  matrix_tstats_df = setNames(reshape2::melt(matrix_tstats), c("phenotype","module","tstats"))
+  all_stats_df = matrix_pvalue_df %>% left_join(matrix_rsquared_df) %>% left_join(matrix_tstats_df) %>%  arrange(nom_p)
+
+  return(list(all_stats_df = all_stats_df, matrix_rsquared = matrix_rsquared, matrix_pvalue = matrix_pvalue, matrix_tstats = matrix_tstats_df))
+}
+
+plot_module_trait_association_heatmap <- function(res_test, to_show, show_only_significant = F, signif_cutoff = c("***","**","*")){
+  library(ComplexHeatmap)
+  library(circlize)
+  library(RColorBrewer)
+
+  matrix_rsquared = res_test$matrix_rsquared
+  matrix_pvalue = res_test$matrix_pvalue
+  
+  matrix_rsquared_to_plot = matrix_rsquared[,to_show]
+  matrix_pvalue_to_plot = matrix_pvalue[,to_show]
+  
+  # Adjust P-values by each phenotype separately.
+  adj_matrix_pvalue_to_plot = matrix_pvalue_to_plot
+  for(i in 1:nrow(matrix_pvalue_to_plot)){
+    adj_matrix_pvalue_to_plot[i,] = p.adjust(matrix_pvalue_to_plot[i,], method = "bonferroni")
+  }
+  adj_matrix_pvalue_to_plot.signif <- symnum(adj_matrix_pvalue_to_plot, corr = FALSE, na = FALSE, 
+                                             cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, 1), 
+                                             symbols = c("***", "**", "*", ".", " "))
+      
+  log_matrix_pvalue_to_plot = -log10(matrix_pvalue_to_plot)
+  dimnames(log_matrix_pvalue_to_plot) = dimnames(log_matrix_pvalue_to_plot)
+  
+  if(show_only_significant){
+    if(is.numeric(signif_cutoff)){
+      to_keep = colSums(adj_matrix_pvalue_to_plot <= signif_cutoff) > 0
+    }else{
+      to_keep = rep(F,ncol(adj_matrix_pvalue_to_plot.signif))
+      for(cut_i in signif_cutoff){
+        to_keep = to_keep | colSums(adj_matrix_pvalue_to_plot.signif == cut_i) > 0 # change for the significance you want 
+      }
+    }
+    log_matrix_pvalue_to_plot = log_matrix_pvalue_to_plot[,to_keep,drop=F]
+    adj_matrix_pvalue_to_plot.signif = adj_matrix_pvalue_to_plot.signif[,to_keep,drop=F]
+  }
+  
+  matrix_pvalue_to_plot_labels = formatC(log_matrix_pvalue_to_plot, format = "f", digits = 2)
+  log_matrix_pvalue_to_plot_t = t(log_matrix_pvalue_to_plot)
+  
+  # Colored by -log10(pvalue)
+  # Numbers inside cell = -log10(pvalue): nominal
+  Heatmap(log_matrix_pvalue_to_plot_t, name = "-log10(P-value)",
+          cell_fun = function(j, i, x, y, width, height, fill) {
+            if(as.character(t(adj_matrix_pvalue_to_plot.signif)[i,j]) == " "){
+              grid.text( t(matrix_pvalue_to_plot_labels)[i,j], x, y, 
+                        gp = gpar(fontsize = 8))
+            }else{
+              grid.text(paste0( t(matrix_pvalue_to_plot_labels)[i,j],"\n", t(adj_matrix_pvalue_to_plot.signif)[i,j] ), x, y, 
+                        gp = gpar(fontsize = 8))
+            }
+          },
+          col = colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100),
+          row_names_side = "left", show_row_names = T,
+          cluster_rows = F, cluster_columns = F,
+          column_names_gp = gpar(fontsize = 9),
+          row_names_gp = gpar(fontsize = 9),
+          show_row_dend = F, show_column_dend = F, rect_gp = gpar(col = "white", lwd = 1))
+}
+
+work_dir = "/pastel/Github_scripts/SpeakEasy_dlpfc/sn_dlpfc/2nd_pass/eigen_reports/save_lr_adjcov/"
+se_results_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_singlenuclei/2nd_pass/snakemake-sn/results/"
+source("/pastel/Github_scripts/SpeakEasy_net/downstream_speakeasy/speakeasy_downstream_lib.R") # Our Fisher test script. Pvalue adjusted by Bonferroni 
+
+load("/pastel/projects/spatial_t/pseudo_bulk/phenotypes.RData") # phenotypes
+ids_dir = "/pastel/resources/ids_datasets/"
+```
+
+```{r echo=TRUE}
+
+mypal = c("#1f77b4", # ast
+          "#ff7f0e", # end
+          "#2ca02c", # ext
+          "#d62728", # inh
+          "#9467bd", # mic
+          "#8c564b", # opc
+          "#e377c2"  # oli
+)
+mypal = setNames(mypal,c("ast","end","ext","inh","mic","opc","oli"))
+
+cell_names = c("Astrocytes", "Endothelial cells", "Excitatory Neurons", "Inhibitory Neurons", "Microglia", "Oligodendrocytes", "OPCs")
+cell_names = setNames(cell_names, c("ast","end","ext","inh","mic","oli","opc"))
+
+pheno_list = c("cogng_demog_slope"="gaussian", # Cognitive decline slope. Remove the effect of demog 
+               "cogng_path_slope"="gaussian", # Resilience, removed the effect of path + demog
+               "tangles_sqrt"="gaussian", # Tangle density - Mean of 8 brain regions
+               "amyloid_sqrt"="gaussian", # Overall amyloid level - Mean of 8 brain regions
+               "gpath"="gaussian", # Global burden of AD pathology based on 5 regions
+               "tdp_cs_6reg"="gaussian", # TDP-43, 6 region severity summary
+               "ad_dementia_status"="binomial" # Clinical AD # CT = MCI + NCI 
+               )
+
+```
+
+# Load sn
+```{r}
+sn_columbia <- read.table(paste0(ids_dir, "projid_sn_columbia.txt"), header = T)
+sn_columbia$projid <- sprintf("%08d", sn_columbia$projid)
+
+load(paste0(work_dir,"/MIT_pseudobulk_norm.RData"))
+```
+
+# Read sn modules 
+
+```{r}
+se_results_dir = "/pastel/projects/speakeasy_dlpfc/SpeakEasy_singlenuclei/2nd_pass/snakemake-sn/results/"
+# Load sn modules
+sn_modules = data.frame()
+for(cell_type in c("ext","inh","ast","oli","mic","end","opc")){
+  # Filter modules with lest than 30 genes
+  modules_file = read.table(paste0(se_results_dir,cell_type,"/geneBycluster.txt"), header = T)
+  modules_file = modules_file[, c("ensembl", "gene_name", "cluster_lv3")]
+  modules_file$module_clusters = paste0(cell_type,"_M", modules_file$cluster_lv3)
+  modules_file$cluster_lv3 = NULL
+  
+  modules_file = modules_file %>% dplyr::group_by(module_clusters) %>%
+    dplyr::mutate(module_size = n()) %>% dplyr::filter(module_size >= 30) %>%
+    dplyr::mutate(cell_type = cell_type)
+  
+  sn_modules = rbind(sn_modules, modules_file)
+}
+# length(unique(sn_modules$module_clusters)) # 193
+# modules by cell type
+table(unique(sn_modules[,c("module_clusters","cell_type")])$cell_type) # 7
+```
+
+# Project sn modules in the MIT data
+
+We already have the modules from the Columbia sn-ROSMAP, so I'll use them as a gene list and calculate the eigengenes and module average expression for the MIT sn-ROSMAP dataset. Then, we’ll run regressions with AD-related covariates to check for associations.
+
+Heatmaps: Bonferroni adjusted by column. 
+
+## Astrocytes 
+We keep only the MIT samples NOT in Columbia sn. 
+```{r}
+# Astrocytes 
+net_output = unique(sn_modules[sn_modules$cell_type == "ast", ])
+expr_mtx_sel = as.data.frame(celltype_exp$ast$tmm_voom)[, ! colnames(celltype_exp$ast$tmm_voom) %in% sn_columbia$projid]
+rownames(expr_mtx_sel) <- gsub("(*.)\\.(.*)","\\1", rownames(expr_mtx_sel))
+expr_mtx_sel$ensembl = rownames(expr_mtx_sel)
+gene_mod_map = data.frame(ensembl = rownames(expr_mtx_sel))
+gene_mod_map = gene_mod_map %>% inner_join(unique(net_output[,c("ensembl","module_clusters")]), by = c("ensembl"))
+gene_mod_map$cluster_lv3 = gsub("(.*)_M(.*)","\\2",gene_mod_map$module_clusters)
+
+expr_mtx_sel_ord = expr_mtx_sel[match(gene_mod_map$ensembl,rownames(expr_mtx_sel)),] # order the matrix
+identical(rownames(expr_mtx_sel_ord), gene_mod_map$ensembl) # must be TRUE 
+
+colors_mod = gene_mod_map$cluster_lv3
+expr_mtx_sel_ord$ensembl = NULL
+expr_mtx_sel_ord_t <- data.frame(t(as.matrix(expr_mtx_sel_ord)))
+external_ME = moduleEigengenes(expr_mtx_sel_ord_t, colors = colors_mod)
+mod_average = external_ME$averageExpr # data.frame
+
+# Save results 
+save(external_ME, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleEigengenes_lv3_ast.Rdata"))
+write.table(external_ME$eigengenes, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleEigengenes_lv3_ast.txt"), sep = "\t", quote = F, row.names = T)
+write.table(external_ME$averageExpr, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleaverageExpr_lv3_ast.txt"), sep = "\t", quote = F, row.names = T)
+```
+
+### Regressions 
+```{r message=TRUE}
+data4linear_reg <- mod_average # match codes name 
+phenotype_dt = phenotypes[match(rownames(data4linear_reg), phenotypes$projid), ]
+
+all(rownames(data4linear_reg) == phenotype_dt$projid) # Must be TRUE. Match IDs
+# hist(phenotype_dt$amyloid_sqrt)
+message(paste0("Unique participants: ", length(unique(phenotype_dt$projid)))) 
+```
+
+```{r, message=FALSE, results='hide', warning=FALSE, fig.width=4, fig.height=8}
+res_test = run_module_trait_association(data4linear_reg = data4linear_reg, 
+                                        phenotype_dt = phenotype_dt, 
+                                        pheno_list = pheno_list, 
+                                        covariates = c("age_death","msex", "educ")) # covariates to adjust
+matrix_rsquared = res_test$matrix_rsquared
+matrix_pvalue = res_test$matrix_pvalue
+save(res_test, file = paste0(work_dir, "replication_analysis_filt/MIT_res_test_ast.Rdata"))
+
+plot_module_trait_association_heatmap(res_test)
+```
+
+### Top results
+Top result by covariate. 
+
+```{r}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+### Nominal pvalue
+```{r}
+createDT(matrix_pvalue)
+```
+
+### Significant results
+Threshold: At least one module with adjusted pvalue < 0.05. 
+
+```{r fig.height=4, fig.width=5}
+plot_module_trait_association_heatmap(res_test, show_only_significant = T, signif_cutoff = 0.05)
+```
+
+## Microglia 
+```{r}
+net_output = unique(sn_modules[sn_modules$cell_type == "mic", ])
+expr_mtx_sel = celltype_exp$mic$tmm_voom[, ! colnames(celltype_exp$mic$tmm_voom) %in% sn_columbia$projid]
+rownames(expr_mtx_sel) <- gsub("(*.)\\.(.*)","\\1", rownames(expr_mtx_sel))
+expr_mtx_sel$ensembl = rownames(expr_mtx_sel)
+gene_mod_map = data.frame(ensembl = rownames(expr_mtx_sel))
+gene_mod_map = gene_mod_map %>% inner_join(unique(net_output[,c("ensembl","module_clusters")]), by = c("ensembl"))
+gene_mod_map$cluster_lv3 = gsub("(.*)_M(.*)","\\2",gene_mod_map$module_clusters)
+
+expr_mtx_sel_ord = expr_mtx_sel[match(gene_mod_map$ensembl,rownames(expr_mtx_sel)),] # order the matrix
+identical(rownames(expr_mtx_sel_ord), gene_mod_map$ensembl) # must be TRUE 
+
+colors_mod = gene_mod_map$cluster_lv3
+expr_mtx_sel_ord$ensembl = NULL
+expr_mtx_sel_ord_t <- data.frame(t(as.matrix(expr_mtx_sel_ord)))
+external_ME = moduleEigengenes(expr_mtx_sel_ord_t, colors = colors_mod)
+mod_average = external_ME$averageExpr # data.frame
+
+# Save results 
+save(external_ME, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleEigengenes_lv3_mic.Rdata"))
+write.table(external_ME$eigengenes, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleEigengenes_lv3_mic.txt"), sep = "\t", quote = F, row.names = T)
+write.table(external_ME$averageExpr, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleaverageExpr_lv3_mic.txt"), sep = "\t", quote = F, row.names = T)
+```
+
+### Regressions 
+```{r message=TRUE}
+data4linear_reg <- mod_average # match codes name 
+phenotype_dt = phenotypes[match(rownames(data4linear_reg), phenotypes$projid), ]
+
+all(rownames(data4linear_reg) == phenotype_dt$projid) # Must be TRUE. Match IDs
+# hist(phenotype_dt$amyloid_sqrt)
+message(paste0("Unique participants: ", length(unique(phenotype_dt$projid)))) 
+```
+
+```{r, message=FALSE, results='hide', warning=FALSE, fig.width=4, fig.height=10}
+res_test = run_module_trait_association(data4linear_reg, phenotype_dt, pheno_list, covariates = c("age_death","msex", "educ")) # covariates to adjust
+matrix_rsquared = res_test$matrix_rsquared
+matrix_pvalue = res_test$matrix_pvalue
+save(res_test, file = paste0(work_dir, "replication_analysis_filt/MIT_res_test_mic.Rdata"))
+
+plot_module_trait_association_heatmap(res_test)
+```
+
+### Top results
+Top result by covariate. 
+
+```{r}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+### Nominal pvalue
+```{r}
+createDT(matrix_pvalue)
+```
+
+### Significant results
+Threshold: At lemic one module with adjusted pvalue < 0.05. 
+
+```{r fig.height=3.5, fig.width=4}
+plot_module_trait_association_heatmap(res_test, show_only_significant = T, signif_cutoff = 0.05)
+```
+
+## Excitatory neurons
+```{r}
+net_output = unique(sn_modules[sn_modules$cell_type == "ext", ])
+expr_mtx_sel = celltype_exp$ext$tmm_voom[, ! colnames(celltype_exp$ext$tmm_voom) %in% sn_columbia$projid]
+rownames(expr_mtx_sel) <- gsub("(*.)\\.(.*)","\\1", rownames(expr_mtx_sel))
+expr_mtx_sel$ensembl = rownames(expr_mtx_sel)
+gene_mod_map = data.frame(ensembl = rownames(expr_mtx_sel))
+gene_mod_map = gene_mod_map %>% inner_join(unique(net_output[,c("ensembl","module_clusters")]), by = c("ensembl"))
+gene_mod_map$cluster_lv3 = gsub("(.*)_M(.*)","\\2",gene_mod_map$module_clusters)
+
+expr_mtx_sel_ord = expr_mtx_sel[match(gene_mod_map$ensembl,rownames(expr_mtx_sel)),] # order the matrix
+identical(rownames(expr_mtx_sel_ord), gene_mod_map$ensembl) # must be TRUE 
+
+colors_mod = gene_mod_map$cluster_lv3
+expr_mtx_sel_ord$ensembl = NULL
+expr_mtx_sel_ord_t <- data.frame(t(as.matrix(expr_mtx_sel_ord)))
+external_ME = moduleEigengenes(expr_mtx_sel_ord_t, colors = colors_mod)
+mod_average = external_ME$averageExpr # data.frame
+
+# Save results 
+save(external_ME, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleEigengenes_lv3_ext.Rdata"))
+write.table(external_ME$eigengenes, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleEigengenes_lv3_ext.txt"), sep = "\t", quote = F, row.names = T)
+write.table(external_ME$averageExpr, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleaverageExpr_lv3_ext.txt"), sep = "\t", quote = F, row.names = T)
+```
+
+### Regressions 
+```{r message=TRUE}
+data4linear_reg <- mod_average # match codes name 
+phenotype_dt = phenotypes[match(rownames(data4linear_reg), phenotypes$projid), ]
+
+all(rownames(data4linear_reg) == phenotype_dt$projid) # Must be TRUE. Match IDs
+# hist(phenotype_dt$amyloid_sqrt)
+message(paste0("Unique participants: ", length(unique(phenotype_dt$projid)))) 
+```
+
+```{r, message=FALSE, results='hide', warning=FALSE, fig.width=4, fig.height=9}
+res_test = run_module_trait_association(data4linear_reg, phenotype_dt, pheno_list, covariates = c("age_death","msex", "educ")) # covariates to adjust
+matrix_rsquared = res_test$matrix_rsquared
+matrix_pvalue = res_test$matrix_pvalue
+save(res_test, file = paste0(work_dir, "replication_analysis_filt/MIT_res_test_ext.Rdata"))
+
+plot_module_trait_association_heatmap(res_test)
+```
+
+### Top results
+Top result by covariate. 
+
+```{r}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+### Nominal pvalue
+```{r}
+createDT(matrix_pvalue)
+```
+
+### Significant results
+Threshold: At least one module with adjusted pvalue < 0.05. 
+
+```{r fig.height=4, fig.width=4}
+plot_module_trait_association_heatmap(res_test, show_only_significant = T, signif_cutoff = 0.05)
+```
+
+## Inhibitory neurons
+```{r}
+net_output = unique(sn_modules[sn_modules$cell_type == "inh", ])
+expr_mtx_sel = celltype_exp$inh$tmm_voom[, ! colnames(celltype_exp$inh$tmm_voom) %in% sn_columbia$projid]
+rownames(expr_mtx_sel) <- gsub("(*.)\\.(.*)","\\1", rownames(expr_mtx_sel))
+expr_mtx_sel$ensembl = rownames(expr_mtx_sel)
+gene_mod_map = data.frame(ensembl = rownames(expr_mtx_sel))
+gene_mod_map = gene_mod_map %>% inner_join(unique(net_output[,c("ensembl","module_clusters")]), by = c("ensembl"))
+gene_mod_map$cluster_lv3 = gsub("(.*)_M(.*)","\\2",gene_mod_map$module_clusters)
+
+expr_mtx_sel_ord = expr_mtx_sel[match(gene_mod_map$ensembl,rownames(expr_mtx_sel)),] # order the matrix
+identical(rownames(expr_mtx_sel_ord), gene_mod_map$ensembl) # must be TRUE 
+
+colors_mod = gene_mod_map$cluster_lv3
+expr_mtx_sel_ord$ensembl = NULL
+expr_mtx_sel_ord_t <- data.frame(t(as.matrix(expr_mtx_sel_ord)))
+external_ME = moduleEigengenes(expr_mtx_sel_ord_t, colors = colors_mod)
+mod_average = external_ME$averageExpr # data.frame
+
+# Save results 
+save(external_ME, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleEigengenes_lv3_inh.Rdata"))
+write.table(external_ME$eigengenes, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleEigengenes_lv3_inh.txt"), sep = "\t", quote = F, row.names = T)
+write.table(external_ME$averageExpr, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleaverageExpr_lv3_inh.txt"), sep = "\t", quote = F, row.names = T)
+```
+
+### Regressions 
+```{r message=TRUE}
+data4linear_reg <- mod_average # match codes name 
+phenotype_dt = phenotypes[match(rownames(data4linear_reg), phenotypes$projid), ]
+
+all(rownames(data4linear_reg) == phenotype_dt$projid) # Must be TRUE. Match IDs
+# hist(phenotype_dt$amyloid_sqrt)
+message(paste0("Unique participants: ", length(unique(phenotype_dt$projid)))) 
+```
+
+```{r, message=FALSE, results='hide', warning=FALSE, fig.width=4, fig.height=8}
+res_test = run_module_trait_association(data4linear_reg, phenotype_dt, pheno_list, covariates = c("age_death","msex", "educ")) # covariates to adjust
+matrix_rsquared = res_test$matrix_rsquared
+matrix_pvalue = res_test$matrix_pvalue
+save(res_test, file = paste0(work_dir, "replication_analysis_filt/MIT_res_test_inh.Rdata"))
+
+plot_module_trait_association_heatmap(res_test)
+```
+
+### Top results
+Top result by covariate. 
+
+```{r}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+### Nominal pvalue
+```{r}
+createDT(matrix_pvalue)
+```
+
+### Significant results
+Threshold: At least one module with adjusted pvalue < 0.05. 
+
+```{r fig.height=3.5, fig.width=4.5}
+plot_module_trait_association_heatmap(res_test, show_only_significant = T, signif_cutoff = 0.05)
+```
+
+## Oligodendrocytes 
+```{r}
+net_output = unique(sn_modules[sn_modules$cell_type == "oli", ])
+expr_mtx_sel = celltype_exp$oli$tmm_voom[, ! colnames(celltype_exp$oli$tmm_voom) %in% sn_columbia$projid]
+rownames(expr_mtx_sel) <- gsub("(*.)\\.(.*)","\\1", rownames(expr_mtx_sel))
+expr_mtx_sel$ensembl = rownames(expr_mtx_sel)
+gene_mod_map = data.frame(ensembl = rownames(expr_mtx_sel))
+gene_mod_map = gene_mod_map %>% inner_join(unique(net_output[,c("ensembl","module_clusters")]), by = c("ensembl"))
+gene_mod_map$cluster_lv3 = gsub("(.*)_M(.*)","\\2",gene_mod_map$module_clusters)
+
+expr_mtx_sel_ord = expr_mtx_sel[match(gene_mod_map$ensembl,rownames(expr_mtx_sel)),] # order the matrix
+identical(rownames(expr_mtx_sel_ord), gene_mod_map$ensembl) # must be TRUE 
+
+colors_mod = gene_mod_map$cluster_lv3
+expr_mtx_sel_ord$ensembl = NULL
+expr_mtx_sel_ord_t <- data.frame(t(as.matrix(expr_mtx_sel_ord)))
+external_ME = moduleEigengenes(expr_mtx_sel_ord_t, colors = colors_mod)
+mod_average = external_ME$averageExpr # data.frame
+
+# Save results 
+save(external_ME, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleEigengenes_lv3_oli.Rdata"))
+write.table(external_ME$eigengenes, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleEigengenes_lv3_oli.txt"), sep = "\t", quote = F, row.names = T)
+write.table(external_ME$averageExpr, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleaverageExpr_lv3_oli.txt"), sep = "\t", quote = F, row.names = T)
+```
+
+### Regressions 
+```{r message=TRUE}
+data4linear_reg <- mod_average # match codes name 
+phenotype_dt = phenotypes[match(rownames(data4linear_reg), phenotypes$projid), ]
+
+all(rownames(data4linear_reg) == phenotype_dt$projid) # Must be TRUE. Match IDs
+# hist(phenotype_dt$amyloid_sqrt)
+message(paste0("Unique participants: ", length(unique(phenotype_dt$projid)))) 
+```
+
+```{r, message=FALSE, results='hide', warning=FALSE, fig.width=4, fig.height=10}
+res_test = run_module_trait_association(data4linear_reg, phenotype_dt, pheno_list, covariates = c("age_death","msex", "educ")) # covariates to adjust
+matrix_rsquared = res_test$matrix_rsquared
+matrix_pvalue = res_test$matrix_pvalue
+save(res_test, file = paste0(work_dir, "replication_analysis_filt/MIT_res_test_oli.Rdata"))
+
+plot_module_trait_association_heatmap(res_test)
+```
+
+### Top results
+Top result by covariate. 
+
+```{r}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+### Nominal pvalue
+```{r}
+createDT(matrix_pvalue)
+```
+
+### Significant results
+Threshold: At least one module with adjusted pvalue < 0.05. 
+
+```{r fig.height=6, fig.width=5}
+plot_module_trait_association_heatmap(res_test, show_only_significant = T, signif_cutoff = 0.05)
+```
+
+## Endothelial cells 
+```{r}
+net_output = unique(sn_modules[sn_modules$cell_type == "end", ])
+expr_mtx_sel = celltype_exp$end$tmm_voom[, ! colnames(celltype_exp$end$tmm_voom) %in% sn_columbia$projid]
+rownames(expr_mtx_sel) <- gsub("(*.)\\.(.*)","\\1", rownames(expr_mtx_sel))
+expr_mtx_sel$ensembl = rownames(expr_mtx_sel)
+gene_mod_map = data.frame(ensembl = rownames(expr_mtx_sel))
+gene_mod_map = gene_mod_map %>% inner_join(unique(net_output[,c("ensembl","module_clusters")]), by = c("ensembl"))
+gene_mod_map$cluster_lv3 = gsub("(.*)_M(.*)","\\2",gene_mod_map$module_clusters)
+
+expr_mtx_sel_ord = expr_mtx_sel[match(gene_mod_map$ensembl,rownames(expr_mtx_sel)),] # order the matrix
+identical(rownames(expr_mtx_sel_ord), gene_mod_map$ensembl) # must be TRUE 
+
+colors_mod = gene_mod_map$cluster_lv3
+expr_mtx_sel_ord$ensembl = NULL
+expr_mtx_sel_ord_t <- data.frame(t(as.matrix(expr_mtx_sel_ord)))
+external_ME = moduleEigengenes(expr_mtx_sel_ord_t, colors = colors_mod)
+mod_average = external_ME$averageExpr # data.frame
+
+# Save results 
+save(external_ME, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleEigengenes_lv3_end.Rdata"))
+write.table(external_ME$eigengenes, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleEigengenes_lv3_end.txt"), sep = "\t", quote = F, row.names = T)
+write.table(external_ME$averageExpr, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleaverageExpr_lv3_end.txt"), sep = "\t", quote = F, row.names = T)
+```
+
+### Regressions 
+```{r message=TRUE}
+data4linear_reg <- mod_average # match codes name 
+phenotype_dt = phenotypes[match(rownames(data4linear_reg), phenotypes$projid), ]
+
+all(rownames(data4linear_reg) == phenotype_dt$projid) # Must be TRUE. Match IDs
+# hist(phenotype_dt$amyloid_sqrt)
+message(paste0("Unique participants: ", length(unique(phenotype_dt$projid)))) 
+```
+
+```{r, message=FALSE, results='hide', warning=FALSE, fig.width=4, fig.height=8}
+res_test = run_module_trait_association(data4linear_reg, phenotype_dt, pheno_list, covariates = c("age_death","msex", "educ")) # covariates to adjust
+matrix_rsquared = res_test$matrix_rsquared
+matrix_pvalue = res_test$matrix_pvalue
+save(res_test, file = paste0(work_dir, "replication_analysis_filt/MIT_res_test_end.Rdata"))
+
+plot_module_trait_association_heatmap(res_test)
+```
+
+### Top results
+Top result by covariate. 
+
+```{r}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+### Nominal pvalue
+```{r}
+createDT(matrix_pvalue)
+```
+
+### Significant results
+Threshold: At least one module with adjusted pvalue < 0.05. 
+
+```{r fig.height=2.5, fig.width=4.5}
+plot_module_trait_association_heatmap(res_test, show_only_significant = T, signif_cutoff = 0.05)
+```
+
+## OPCs
+```{r}
+net_output = unique(sn_modules[sn_modules$cell_type == "opc", ])
+expr_mtx_sel = celltype_exp$opc$tmm_voom[, ! colnames(celltype_exp$opc$tmm_voom) %in% sn_columbia$projid]
+rownames(expr_mtx_sel) <- gsub("(*.)\\.(.*)","\\1", rownames(expr_mtx_sel))
+expr_mtx_sel$ensembl = rownames(expr_mtx_sel)
+gene_mod_map = data.frame(ensembl = rownames(expr_mtx_sel))
+gene_mod_map = gene_mod_map %>% inner_join(unique(net_output[,c("ensembl","module_clusters")]), by = c("ensembl"))
+gene_mod_map$cluster_lv3 = gsub("(.*)_M(.*)","\\2",gene_mod_map$module_clusters)
+
+expr_mtx_sel_ord = expr_mtx_sel[match(gene_mod_map$ensembl,rownames(expr_mtx_sel)),] # order the matrix
+identical(rownames(expr_mtx_sel_ord), gene_mod_map$ensembl) # must be TRUE 
+
+colors_mod = gene_mod_map$cluster_lv3
+expr_mtx_sel_ord$ensembl = NULL
+expr_mtx_sel_ord_t <- data.frame(t(as.matrix(expr_mtx_sel_ord)))
+external_ME = moduleEigengenes(expr_mtx_sel_ord_t, colors = colors_mod)
+mod_average = external_ME$averageExpr # data.frame
+
+# Save results 
+save(external_ME, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleEigengenes_lv3_opc.Rdata"))
+write.table(external_ME$eigengenes, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleEigengenes_lv3_opc.txt"), sep = "\t", quote = F, row.names = T)
+write.table(external_ME$averageExpr, file = paste0(work_dir, "replication_analysis_filt/MIT_moduleaverageExpr_lv3_opc.txt"), sep = "\t", quote = F, row.names = T)
+```
+
+### Regressions 
+```{r message=TRUE}
+data4linear_reg <- mod_average # match codes name 
+phenotype_dt = phenotypes[match(rownames(data4linear_reg), phenotypes$projid), ]
+
+all(rownames(data4linear_reg) == phenotype_dt$projid) # Must be TRUE. Match IDs
+# hist(phenotype_dt$amyloid_sqrt)
+message(paste0("Unique participants: ", length(unique(phenotype_dt$projid)))) 
+```
+
+```{r, message=FALSE, results='hide', warning=FALSE, fig.width=4, fig.height=8}
+res_test = run_module_trait_association(data4linear_reg, phenotype_dt, pheno_list, covariates = c("age_death","msex", "educ")) # covariates to adjust
+matrix_rsquared = res_test$matrix_rsquared
+matrix_pvalue = res_test$matrix_pvalue
+save(res_test, file = paste0(work_dir, "replication_analysis_filt/MIT_res_test_opc.Rdata"))
+
+plot_module_trait_association_heatmap(res_test)
+```
+
+### Top results
+Top result by covariate. 
+
+```{r}
+# res_test$all_stats_df 
+createDT(res_test$all_stats_df %>% group_by(phenotype) %>% slice_head(n = 1))
+```
+
+### Nominal pvalue
+```{r}
+createDT(matrix_pvalue)
+```
+
+### Significant results
+Threshold: At least one module with adjusted pvalue < 0.05. 
+
+```{r fig.height=3, fig.width=5}
+plot_module_trait_association_heatmap(res_test, show_only_significant = T, signif_cutoff = 0.05)
+```
+
+# Session info
+```{r}
+sessionInfo()
+```

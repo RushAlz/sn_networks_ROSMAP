@@ -1,0 +1,178 @@
+---
+title: "Single nuclei from DLPFC"
+subtitle: "Replication vs MIT data"
+author:  |
+ | Katia de Paiva Lopes 
+ | Ricardo A. Vialle
+ | Shinya Tasaki
+ |
+ | Rush Alzheimer’s Disease Center
+ | Chicago, IL 60612
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: tango
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+```{r clean.variables, echo=FALSE}
+#This command clean all variables. BE CAREFULL!!! 
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+```{r Helper Functions, echo=FALSE}
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+```
+
+```{r load.packages, echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(ggeasy)
+library(tidyverse)
+
+reg_modules_dir = "/pastel/Github_scripts/SpeakEasy_dlpfc/sn_dlpfc/2nd_pass/"
+work_dir = "/pastel/Github_scripts/SpeakEasy_dlpfc/sn_dlpfc/2nd_pass/eigen_reports/save_lr_adjcov/"
+```
+
+```{r eval=T}
+# Regression results from the MIT data NOT present while building modules 
+load(paste0(work_dir, "replication_analysis_filt/MIT_res_test_ast.Rdata"))
+stats_ast = res_test$all_stats_df
+stats_ast$network = "ast"
+
+load(paste0(work_dir, "replication_analysis_filt/MIT_res_test_mic.Rdata"))
+stats_mic = res_test$all_stats_df
+stats_mic$network = "mic"
+
+load(paste0(work_dir, "replication_analysis_filt/MIT_res_test_ext.Rdata"))
+stats_ext = res_test$all_stats_df
+stats_ext$network = "ext"
+
+load(paste0(work_dir, "replication_analysis_filt/MIT_res_test_inh.Rdata"))
+stats_inh = res_test$all_stats_df
+stats_inh$network = "inh"
+
+load(paste0(work_dir, "replication_analysis_filt/MIT_res_test_oli.Rdata"))
+stats_oli = res_test$all_stats_df
+stats_oli$network = "oli"
+
+load(paste0(work_dir, "replication_analysis_filt/MIT_res_test_end.Rdata"))
+stats_end = res_test$all_stats_df
+stats_end$network = "end"
+
+load(paste0(work_dir, "replication_analysis_filt/MIT_res_test_opc.Rdata"))
+stats_opc = res_test$all_stats_df
+stats_opc$network = "opc"
+
+all_stats = rbind(stats_ast, stats_mic, stats_ext, stats_inh, stats_oli, stats_end, stats_opc)
+save(all_stats, file = paste0(work_dir, "replication_analysis_filt/all_res_test_stats_sn_MIT_filt.Rdata"))
+```
+
+# All stats 
+```{r}
+load(paste0(work_dir, "replication_analysis_filt/all_res_test_stats_sn_MIT_filt.Rdata"))
+createDT(all_stats %>% arrange(nom_p))
+```
+
+# Counting modules
+```{r warning=FALSE, message=FALSE, fig.width=12, fig.height=4}
+# Sn modules built from the Columbia 424 samples 
+modules_reg_results = read_tsv(paste0(reg_modules_dir, "snModules_ADtraits_results.tsv.gz"))
+# replication using MIT data (independent ROSMAP donors)
+load(paste0(work_dir, "replication_analysis_filt/all_res_test_stats_sn_MIT_filt.Rdata"))
+
+modules_trait_associ_repl = modules_reg_results %>% left_join(all_stats, by = c("phenotype","module","network"), suffix = c("_columbia","_mit")) %>%
+  # filter(phenotype %in% c("amyloid_sqrt","tangles_sqrt","cogng_demog_slope")) %>%
+  select(phenotype, module, network, nom_p_columbia, nom_p_mit, FDR, module2) %>%
+  arrange(FDR) %>%
+  mutate(replicated = FDR <= 0.05 & nom_p_mit <= 0.05)
+
+# How many modules replicated?
+bind_rows(modules_trait_associ_repl %>% filter(FDR <= 0.05) %>% summarise(n_discovery = n(), n_replication = sum(replicated)) %>%
+  mutate(replication_rate = n_replication/n_discovery, threshold = 0.05),
+modules_trait_associ_repl %>% filter(FDR <= 0.01) %>% summarise(n_discovery = n(), n_replication = sum(replicated)) %>%
+  mutate(replication_rate = n_replication/n_discovery, threshold = 0.01),
+modules_trait_associ_repl %>% filter(FDR <= 0.005) %>% summarise(n_discovery = n(), n_replication = sum(replicated)) %>%
+  mutate(replication_rate = n_replication/n_discovery, threshold = 0.005),
+modules_trait_associ_repl %>% filter(FDR <= 0.001) %>% summarise(n_discovery = n(), n_replication = sum(replicated)) %>%
+  mutate(replication_rate = n_replication/n_discovery, threshold = 0.001)) %>%
+  mutate(threshold = factor(threshold, levels = c(0.05,0.01,0.005,0.001))) %>%
+  ggplot(aes(x = threshold, y = replication_rate)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(round(replication_rate*100, 1), "%\nof ",n_discovery)), vjust = 1.5, color = "white") +
+  # scale_x_continuous(breaks = c(0.001, 0.005, 0.01, 0.05), labels = c("0.001", "0.005", "0.01", "0.05")) +
+  labs(x = "FDR threshold", y = "Replication rate", title = "Replication of module-trait associations") +
+  theme_minimal() -> plot_a
+
+fdr_p_line = max(modules_trait_associ_repl$nom_p_columbia[modules_trait_associ_repl$FDR<0.05])
+# compare the nominal p-values from the Columbia and MIT data (scater plot)
+ggplot(modules_trait_associ_repl, aes(y = -log10(nom_p_columbia), x = -log10(nom_p_mit))) +
+  geom_point(aes(color = replicated)) +
+  # geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  scale_color_manual(values = c("grey", "red")) +
+  geom_smooth(method='lm') +
+  lims(y = c(0, 10)) +
+  ggpubr::stat_cor(label.x.npc = .7, label.y.npc = 1) +
+  geom_vline(xintercept = -log10(0.05), linetype = "dashed") +
+  annotate("text", y=Inf, x=-log10(0.05), label=paste0("nom P < 5%"), size=3, angle=-90, vjust=-0.4, hjust=0) +
+  geom_hline(yintercept = -log10(fdr_p_line), linetype = "dashed") +
+  annotate("text", x=0, y=-log10(fdr_p_line), label=paste0("FDR < 5%"), size=3, angle=0, vjust=-0.4, hjust=0) +
+  ggrepel::geom_text_repel(data = modules_trait_associ_repl %>% filter(replicated), aes(label = module2), size = 3.5, show.legend = F) +
+  labs(y = "-log10 nominal p-value (Columbia)", x = "-log10 nominal p-value (MIT)", color = "Replicated") +
+  theme_minimal() -> plot_b
+
+# pdf(file = paste0(work_dir, "replication_analysis_filt/replication_MIT_ind.pdf"), width = 12, height = 5)
+ggpubr::ggarrange(plot_a, plot_b, ncol = 2, widths = c(1, 2), labels = c("a)", "b)"))
+# dev.off()
+```
+
+```{r warning=FALSE, message=FALSE, fig.width=12, fig.height=4}
+modules_trait_associ_repl = modules_reg_results[modules_reg_results$phenotype %in% c("amyloid_sqrt", "tangles_sqrt", "cogng_demog_slope"), ] %>% left_join(all_stats, by = c("phenotype","module","network"), suffix = c("_columbia","_mit")) %>%
+  select(phenotype, module, network, nom_p_columbia, nom_p_mit, tstats_columbia, tstats_mit, FDR, module2) %>%
+  arrange(FDR) %>%
+  mutate(replicated = FDR <= 0.05 & nom_p_mit <= 0.05)
+
+modules_trait_associ_repl$phenotype[modules_trait_associ_repl$phenotype == "amyloid_sqrt"] <- "Amyloid"
+modules_trait_associ_repl$phenotype[modules_trait_associ_repl$phenotype == "tangles_sqrt"] <- "Tangles"
+modules_trait_associ_repl$phenotype[modules_trait_associ_repl$phenotype == "cogng_demog_slope"] <- "Cognition"
+
+# pdf(file = paste0(work_dir, "replication_analysis_filt/replication_MIT_pheno.pdf"), width = 12, height = 4)
+ggplot(modules_trait_associ_repl #%>% filter(nom_p_columbia <= 0.05)
+         ,aes(y = tstats_columbia, x = tstats_mit)) +
+  geom_point(aes(color = replicated)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  scale_color_manual(values = c("grey", "red")) +
+  geom_smooth(method='lm') +
+  # lims(y = c(0, 10)) +
+  ggpubr::stat_cor() +
+  ggrepel::geom_text_repel(data = modules_trait_associ_repl %>% filter(replicated), aes(label = module2), size = 3.5, show.legend = F) +
+  labs(y = "t-statistics (Columbia)", x = "t-statistics (MIT)", color = "Replicated") +
+  theme_minimal() +
+  # coord_fixed() +
+  facet_wrap(~phenotype, nrow = 1) 
+# dev.off()
+```
+
+# Session
+```{r}
+sessionInfo()
+```
+
+
+
+
