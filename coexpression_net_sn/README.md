@@ -51,7 +51,7 @@ Do the modules recapitulate sub-cell types clusters/states? [Results here](https
 
 :small_orange_diamond: Replication with an external single-nucleus dataset 
 
- - [MIT filtered](https://rushalz.github.io/sn_networks_ROSMAP/coexpression_net_sn/replication/replication_vs_MIT_filt_summarized.html) single-nucleus. Includes association heatmaps by cell type for the samples NOT used to create the modules.
+ - [MIT filtered](https://rushalz.github.io/sn_networks_ROSMAP/coexpression_net_sn/replication/replication_vs_MIT_filt.html) single-nucleus. Includes association heatmaps by cell type for the samples NOT used to create the modules.
 
  - [Showing modules](https://rushalz.github.io/sn_networks_ROSMAP/coexpression_net_sn/replication/replication_vs_MIT_filt_summarized2.html) that replicates in MIT samples NOT included to build the modules.
 
