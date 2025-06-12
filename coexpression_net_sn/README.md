@@ -65,5 +65,7 @@ Do the modules recapitulate sub-cell types clusters/states? [Results here](https
 
 - [BN inh_M06](https://rushalz.github.io/sn_networks_ROSMAP/coexpression_net_sn/BN/BN_singlenuc_inh_m6.html) for the top 100 associated genes, runt = 5000.
 
+:small_orange_diamond: Cell type–specific correlation matrices
 
+Available on Zenodo at [this link](https://zenodo.org/records/15653052). 
 
